@@ -38,6 +38,7 @@ best_fit_init_memmap(struct Page *base, size_t n) {
                 break;
             } else if (list_next(le) == &free_list) {
                 list_add(le, &(base->page_link));
+                break;
             }
         }
     }
@@ -102,6 +103,7 @@ best_fit_free_pages(struct Page *base, size_t n) {
                 break;
             } else if (list_next(le) == &free_list) {
                 list_add(le, &(base->page_link));
+                break;
             }
         }
     }
@@ -267,6 +269,53 @@ best_fit_check(void) {
     #endif
 }
 
+// 添加以下两个函数，检查之前遗漏的问题（同一页面被连续分配两次）-lzs
+static void
+best_fit_tail_check(void) {
+    size_t free_before = nr_free_pages();
+
+    /* 从真实空闲区借出 5 页，作为本次测试使用的页面。 */
+    struct Page *base = alloc_pages(5);
+    assert(base != NULL);
+
+    /* 暂存其余空闲区，让测试只面对人为构造的两个块。 */
+    list_entry_t saved_list = free_list;
+    unsigned int saved_nr_free = nr_free;
+    list_init(&free_list);
+    nr_free = 0;
+
+    /* 构造低地址 2 页块，以及高地址 1 页块，触发尾插。 */
+    free_pages(base + 1, 2);
+    free_pages(base + 4, 1);
+
+    struct Page *p = alloc_page();
+    struct Page *q = alloc_page();
+
+    assert(p != NULL && q != NULL);
+    assert(p != q);              /* 同一页面不能被重复分配。 */
+    assert(p == base + 4);       /* Best-Fit 优先选择 1 页块。 */
+    assert(q == base + 1);       /* 然后从 2 页块切出 1 页。 */
+
+    struct Page *r = alloc_page();
+    assert(r == base + 2);
+    assert(nr_free == 0);
+    assert(list_empty(&free_list));
+
+    /* 恢复原有空闲区，再归还测试借出的全部 5 页。 */
+    free_list = saved_list;
+    nr_free = saved_nr_free;
+    free_pages(base, 5);
+
+    assert(nr_free_pages() == free_before);
+    cprintf("best_fit_tail_check() succeeded!\n");
+}
+
+static void
+best_fit_all_check(void) {
+    best_fit_check();
+    best_fit_tail_check();
+}
+
 const struct pmm_manager best_fit_pmm_manager = {
     .name = "best_fit_pmm_manager",
     .init = best_fit_init,
@@ -274,5 +323,5 @@ const struct pmm_manager best_fit_pmm_manager = {
     .alloc_pages = best_fit_alloc_pages,
     .free_pages = best_fit_free_pages,
     .nr_free_pages = best_fit_nr_free_pages,
-    .check = best_fit_check,
+    .check = best_fit_all_check,
 };

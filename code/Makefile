@@ -34,6 +34,15 @@ CFLAGS  := -mcmodel=medany -std=gnu99 -Wno-unused -Werror
 CFLAGS	+= -fno-builtin -Wall -O2 -nostdinc $(DEFS)
 CFLAGS	+= -fno-stack-protector -ffunction-sections -fdata-sections
 CFLAGS	+= -g
+# 新增选择开关，指定 PMM=buddy 时，向 C 编译器传入 PMM_BUDDY 宏 -lzs
+PMM ?= best_fit
+
+ifeq ($(PMM),buddy)
+CFLAGS += -DPMM_BUDDY
+else ifneq ($(PMM),best_fit)
+$(error PMM must be best_fit or buddy)
+endif
+
 CFLAGS2 = $(CFLAGS) -D ucore_test
 CTYPE	:= c S
 LD      := $(GCCPREFIX)ld

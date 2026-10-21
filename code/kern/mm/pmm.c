@@ -10,6 +10,8 @@
 #include <string.h>
 #include <riscv.h>
 #include <dtb.h>
+//添加buddy相关的头文件-lzs
+#include <buddy_pmm.h>
 
 // virtual address of physical page array
 struct Page *pages;
@@ -33,8 +35,13 @@ const struct pmm_manager *pmm_manager;
 static void check_alloc_page(void);
 
 // init_pmm_manager - initialize a pmm_manager instance
+// 修改初始化逻辑 -lzs
 static void init_pmm_manager(void) {
+#ifdef PMM_BUDDY
+    pmm_manager = &buddy_pmm_manager;
+#else
     pmm_manager = &best_fit_pmm_manager;
+#endif
     cprintf("memory management: %s\n", pmm_manager->name);
     pmm_manager->init();
 }
