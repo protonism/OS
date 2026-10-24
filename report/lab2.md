@@ -1127,17 +1127,446 @@ Buddy 初始化和申请释放检查已在 QEMU 通过，最新为 31929 页、1
 
 Buddy 提供页级块分配，未实现页内对象缓存与 SLUB 测试。
 
-### 4.7 分支任务：GDB 调试 QEMU 页表查询与 TLB
+### 4.7分支任务：GDB调试QEMU页表查询与TLB
 
 **负责人：** 2413523-尤祺乐。
 
-**当前状态：** 待负责人补充实际过程与结果。内核启动适配、普通 QEMU 运行和官方评分不能替代本分支的源码双重调试。
+本部分任务旨在通过双重GDB调试页表查询过程的方式，对比模拟器的实现，以更深刻理解地址的翻译过程，同时锻炼向大模型寻求帮助以增强学习效果的能力。
 
-待补内容：调试版 QEMU 的准备与版本、三个终端和两个 GDB 的顺序、源码关键调用路径与分支、真实访存的虚拟/物理地址对应、页表查询单步过程、TLB 命中/未命中、分页开启前后比较、软件 TLB 与真实 CPU TLB 的区别，以及实际问题、AI 交互和截图。
+#### 4.7.1调试环境
 
-<!-- 尤祺乐在此补充真实命令、寄存器/PTE 数值、源码位置及截图。 -->
+在标准的环境之外，需要额外配置调试版的QEMU 4.1.1，为此需要改变配置并重新编译QEMU 4.1.1源代码以获得调试版的QEMU 4.1.1，同时注意不要替换已安装的正常版QEMU 4.1.1。
 
----
+本部分负责人（下称笔者）使用了docker进行环境配置，以免与其他课程所使用的QEMU互相干扰，但安装指令与指导书所示大同小异。
+
+```bash
+mkdir -p /work/qemu-debug-src
+tar -xJf /work/docker/ctx/qemu-4.1.1.tar.xz -C /work/qemu-debug-src
+cd /work/qemu-debug-src/qemu-4.1.1
+make distclean
+./configure --target-list=riscv32-softmmu,riscv64-softmmu --enable-debug
+make -j"$(nproc)"
+```
+
+#### 4.7.2三个终端与命令
+
+本部分任务需要同时观察三个进程的输出：运行中的调试版QEMU、调试调试版QEMU的GDB、通过接口调试QEMU内部运行的ucore内核的GDB。为此需要借助tmux工具或者开启多个终端以同时运行以上进程。笔者在这里使用了VS Code原生支持的终端管理。
+
+##### 终端1
+
+本部分需要修改Makefile中的QEMU变量，考虑为了仓库管理方便，在这一部分使用了命令行变量覆盖的方式，在不修改Makefile的情况下使用调试版QEMU运行ucore内核。
+
+```bash
+cd /work/branches/lab2/code
+make
+make debug QEMU=/work/qemu-debug-src/qemu-4.1.1/riscv64-softmmu/qemu-system-riscv64
+```
+
+##### 终端2
+
+打开终端1后，使用命令获取调试版QEMU进程的PID，将GDB附加到这一进程上即可调试调试版QEMU。
+
+根据助教录制的视频以及对源码的初步阅读，笔者认为QEMU主要通过函数`get_physical_address()`将虚拟地址转化到物理地址，只需为函数打条件断点，只当地址命中内核初始化函数`kern_init()`对应的虚拟地址时才阻塞运行。
+
+```bash
+pgrep -f qemu-system-riscv64
+108
+112
+# 有两个PID是因为我修改了终端1的指令，该指令同样包含QEMU进程名，因此make debug进程也被筛选出来。考虑时间顺序（先make debug再运行QEMU），通常PID较大的那个应该为真正的QEMU进程。
+sudo gdb
+(gdb) attach 112
+(gdb) handle SIGPIPE nostop noprint
+(gdb) b get_physical_address if addr == 0xffffffffc02000d6
+(gdb) c
+```
+
+##### 终端3
+
+终端3的调试与lab1的调试过程类似，不过按照助教录制的视频，考虑到双GDB之间可能的包传递问题，需要输入`set remotetimeout unlimited`以避免超时问题。
+
+```bash
+cd /work/branches/lab2/code
+make gdb
+(gdb) set remotetimeout unlimited
+(gdb) b kern_init
+(gdb) c
+```
+
+以上指令输入完毕后，调试立即开始进行。
+
+#### 4.7.3第一次命中断点
+
+按§4.7.2开始调试后，终端2阻塞运行并显示以下字样：
+
+```text
+Thread 1 "qemu-system-ris" hit Breakpoint 1, get_physical_address (env=0x5a7dc86e2e30, physical=0x7fffb50ce9a8, prot=0x7fffb50ce9a0, addr=18446744072637907158, access_type=0, mmu_idx=3) at /work/qemu-debug-src/qemu-4.1.1/target/riscv/cpu_helper.c:158
+158     {
+```
+
+（截图：`images/first-false-hit.png`）
+
+经过与大模型的探讨，根据输出显示，本次调用`get_physical_address()`的条件有诸多疑点：
+
+- `access_type=0`是数据读，而不是取指；
+- `mmu_idx=3`代表特权级是M-mode，而不是操作系统通常的S-mode，说明在这一次调用并不是由内核发起；
+
+在大模型的指导下，笔者输入以下命令进行验证，以下输出仅节选部分：
+
+```gdb
+(gdb) bt
+#0  get_physical_address (env=0x5a7dc86e2e30,
+    physical=0x7fffb50ce9a8, prot=0x7fffb50ce9a0,
+    addr=18446744072637907158, access_type=0, mmu_idx=3)
+    at /work/qemu-debug-src/qemu-4.1.1/target/riscv/cpu_helper.c:158
+#1  0x00005a7d8ecd0193 in riscv_cpu_get_phys_page_debug (
+    cs=0x5a7dc86da420, addr=18446744072637907158)
+    at /work/qemu-debug-src/qemu-4.1.1/target/riscv/cpu_helper.c:389
+#2  0x00005a7d8eb94958 in cpu_get_phys_page_attrs_debug (
+    cpu=0x5a7dc86da420, addr=18446744072637907158,
+    attrs=0x7fffb50cea28)
+    at /work/qemu-debug-src/qemu-4.1.1/include/qom/cpu.h:607
+#3  0x00005a7d8eb979da in breakpoint_invalidate (
+    cpu=0x5a7dc86da420, pc=18446744072637907158)
+    at /work/qemu-debug-src/qemu-4.1.1/exec.c:1054
+#4  0x00005a7d8eb97ec0 in cpu_breakpoint_insert (
+    cpu=0x5a7dc86da420, pc=18446744072637907158, flags=16,
+    breakpoint=0x0)
+    at /work/qemu-debug-src/qemu-4.1.1/exec.c:1196
+#5  0x00005a7d8ebf3224 in gdb_breakpoint_insert (type=0,
+    addr=18446744072637907158, len=2)
+    at /work/qemu-debug-src/qemu-4.1.1/gdbstub.c:993
+```
+
+指令`bt`可以用于查看线程的函数调用栈，不难看出，本次调用的上级函数是属于QEMU的GDB接口的`gdb_breakpoint_insert()`等函数，而不是页表查询通常应该为的`tlb_fill()`函数。从函数名推测，笔者认为本次命中断点是因为输入指令`b kern_init`后，GDB为在内核初始化函数插入断点，需要获取物理地址，于是调用了`get_physical_address()`函数。因此，本次命中并不属于页表查询的一部分。
+
+#### 4.7.4第二次命中断点
+
+继续调试，在终端2输入`c`，触发第二次命中断点：
+
+```text
+Thread 3 "qemu-system-ris" hit Breakpoint 1, get_physical_address (env=0x5a7dc86e2e30, physical=0x734935614180, prot=0x734935614174, addr=18446744072637907158, access_type=2, mmu_idx=1) at /work/qemu-debug-src/qemu-4.1.1/target/riscv/cpu_helper.c:158
+158     {
+```
+
+此时，终端1显示了OpenSBI固件的相关信息。
+
+（截图：`images/second-real-hit.png`）
+
+本次调用既然成功输出了OpenSBI固件的相关信息，说明代码应当进入了启动内核阶段，本次断点命中很可能是因为页表查询相关。除此之外，以下数据也能佐证这一判断：
+
+- `access_type=2`是取指；
+- `mmu_idx=1`代表特权级是操作系统通常的S-mode；
+
+在终端2输入以下命令进一步确认：
+
+```gdb
+(gdb) bt
+#0  get_physical_address (env=0x5a7dc86e2e30,
+    physical=0x734935614180, prot=0x734935614174,
+    addr=18446744072637907158, access_type=2, mmu_idx=1)
+    at /work/qemu-debug-src/qemu-4.1.1/target/riscv/cpu_helper.c:158
+#1  0x00005a7d8ecd0451 in riscv_cpu_tlb_fill (
+    cs=0x5a7dc86da420, address=18446744072637907158, size=0,
+    access_type=MMU_INST_FETCH, mmu_idx=1, probe=false,
+    retaddr=0)
+    at /work/qemu-debug-src/qemu-4.1.1/target/riscv/cpu_helper.c:451
+#2  0x00005a7d8ec166cf in tlb_fill (cpu=0x5a7dc86da420,
+    addr=18446744072637907158, size=0,
+    access_type=MMU_INST_FETCH, mmu_idx=1, retaddr=0)
+    at /work/qemu-debug-src/qemu-4.1.1/accel/tcg/cputlb.c:878
+```
+
+可以观察到，本次调用归属于`tlb_fill()`函数，说明本次调用函数以获取物理地址的确是为了填充TLB表。接下来应该围绕附近的指令进行调试。
+
+#### 4.7.5单步页表遍历
+
+在第二次命中后，终端2执行`u 252`以跳转到读取PTE的对应代码。在获取PTE之前，`base`、`idx`、`ptesize`、`pte_addr`等变量应该是已经计算得到正确的值了：
+
+```gdb
+(gdb) p/x env->satp
+$2 = 0x8000000000080205
+(gdb) u 252
+get_physical_address (env=0x5a7dc86e2e30, physical=0x734935614180, prot=0x734935614174, addr=18446744072637907158, access_type=2, mmu_idx=1) at /work/qemu-debug-src/qemu-4.1.1/target/riscv/cpu_helper.c:252
+252             target_ulong pte = ldq_phys(cs->as, pte_addr);
+(gdb) p/x base
+$3 = 0x80205000
+(gdb) p/x idx
+$4 = 0x1ff
+(gdb) p/x ptesize
+$5 = 0x8
+(gdb) p/x pte_addr
+$6 = 0x80205ff8
+```
+
+（截图：`images/walk.png`）
+
+解析satp寄存器，可以得到根页表所在的4KiB页的PPN为0x80205，`base = satp.PPN << 12 = 0x80205000`。由于我们是从函数入口直接走到读取PTE的位置，这里停在第一轮循环，`idx=0x1ff`，读的是根页表项。此时`pte_addr = base + idx * ptesize = 0x80205ff8`，满足`base = satp.PPN << 12`与`pte_addr = base + idx * ptesize`。
+
+根据下文读出的`PTE=0x200000cf`的`R/W/X`全为1，说明它是叶子PTE，不再指向下一级页表；又因为它位于根级，所以它映射的是1GiB页。根据内核的实现，启动页表只分配了根页表这一页，没有二级、三级页表，这与根级叶子的判断是吻合的。
+
+输入指令`n`让`ldq_phys`真正读出PTE。只有拿到PTE值，才能根据R、W、X判断它是不是叶子，以及根据PPN判断映射到哪个物理页。再执行命令`p/x pte`：
+
+```gdb
+(gdb) n
+254     target_ulong ppn = pte >> PTE_PPN_SHIFT;
+(gdb) p/x pte
+$7 = 0x200000cf
+```
+
+解析PTE，可以得到PTE所映射的1GiB页对应的PPN为0x80000，D、A、X、W、R、V为1，U、G为0。可以得出该页的物理基地址为0x80000000，是一个有效可读写执行且已被访问与写的内核态访问的页。可读写执行的页，说明PTE是叶子。
+
+理论上，0x80000000是1GiB页的物理基址，有`PPN=0x80000`。1GiB叶子的页内偏移是VA的低30位，`0x80000000+0x2000d6=0x802000d6`。但QEMU的TLB以4KiB为粒度，所以`get_physical_address()`会伪造一个4KiB叶子翻译：把VA的低18位VPN并进PPN，得到`pa=0x80200000`。这不是表示页表里真的有一个4KiB的PTE，也不是分配了一个4KiB的物理页。随后`riscv_cpu_tlb_fill()`调用`tlb_set_page()`把这个页基址写进TLB。
+
+输入命令`fin`，目的是从`get_physical_address()`返回调用者`riscv_cpu_tlb_fill()`，确认函数返回值和输出参数：`pa`是页基址，`prot`是TLB权限，`ret`是调用者局部变量；最后再用`pa | (address & 0xfff)`验证完整PA。
+
+```gdb
+(gdb) fin
+Run till exit from #0  get_physical_address (
+    env=0x5a7dc86e2e30, physical=0x734935614180,
+    prot=0x734935614174, addr=18446744072637907158,
+    access_type=2, mmu_idx=1)
+    at /work/qemu-debug-src/qemu-4.1.1/target/riscv/cpu_helper.c:254
+0x00005a7d8ecd0451 in riscv_cpu_tlb_fill (cs=0x5a7dc86da420, address=18446744072637907158, size=0, access_type=MMU_INST_FETCH, mmu_idx=1, probe=false, retaddr=0) at /work/qemu-debug-src/qemu-4.1.1/target/riscv/cpu_helper.c:451
+451         ret = get_physical_address(env, &pa, &prot, address, access_type, mmu_idx);
+Value returned is $8 = 0
+(gdb) p/x pa
+$9 = 0x80200000
+(gdb) p/x prot
+$10 = 0x7
+(gdb) p/x ret
+$11 = 0x1
+(gdb) p/x pa | (address & 0xfff)
+$12 = 0x802000d6
+```
+
+（截图：`images/pte-pa.png`）
+
+可以看出，`pa=0x80200000`是对应的4KiB页物理基址，`pa | (address & 0xfff) = 0x802000d6`就是完整物理地址。接下来要确认这个页基址是否进入TLB。
+
+选择`tlb_set_page_with_attrs()`作为断点，是因为它是`riscv_cpu_tlb_fill()`调用`tlb_set_page()`后真正填充`CPUTLBEntry`的函数。在终端2输入`c`继续运行：
+
+```gdb
+(gdb) b tlb_set_page_with_attrs
+Breakpoint 2 at 0x5727a3b1d073: file /work/qemu-debug-src/qemu-4.1.1/accel/tcg/cputlb.c, line 700.
+(gdb) c
+Continuing.
+
+Thread 3 "qemu-system-ris" hit Breakpoint 2, tlb_set_page_with_attrs (cpu=0x5727e1cf9420, vaddr=18446744072637906944, paddr=2149580800, attrs=..., prot=7, mmu_idx=1, size=4096) at /work/qemu-debug-src/qemu-4.1.1/accel/tcg/cputlb.c:700
+700     {
+(gdb) p/x vaddr
+$13 = 0xffffffffc0200000
+(gdb) p/x paddr
+$14 = 0x80200000
+(gdb) p/x prot
+$15 = 0x7
+(gdb) bt
+#0  tlb_set_page_with_attrs (cpu=0x5727e1cf9420,
+    vaddr=18446744072637906944, paddr=2149580800, attrs=...,
+    prot=7, mmu_idx=1, size=4096)
+    at /work/qemu-debug-src/qemu-4.1.1/accel/tcg/cputlb.c:700
+#1  0x00005727a3b1d5f3 in tlb_set_page (cpu=0x5727e1cf9420,
+    vaddr=18446744072637906944, paddr=2149580800, prot=7,
+    mmu_idx=1, size=4096)
+    at /work/qemu-debug-src/qemu-4.1.1/accel/tcg/cputlb.c:847
+#2  0x00005727a3bd757a in riscv_cpu_tlb_fill (
+    cs=0x5727e1cf9420, address=18446744072637907158, size=0,
+    access_type=MMU_INST_FETCH, mmu_idx=1, probe=false,
+    retaddr=0)
+    at /work/qemu-debug-src/qemu-4.1.1/target/riscv/cpu_helper.c:472
+#3  0x00005727a3b1d6cf in tlb_fill (cpu=0x5727e1cf9420,
+    addr=18446744072637907158, size=0,
+    access_type=MMU_INST_FETCH, mmu_idx=1, retaddr=0)
+    at /work/qemu-debug-src/qemu-4.1.1/accel/tcg/cputlb.c:878
+```
+
+判断依据：`paddr`就是上面计算得到的`pa=0x80200000`，`vaddr`是页对齐的`0xffffffffc0200000`，`0xd6`不在这里，`prot=0x7`。这说明`get_physical_address()`返回的页基址被原样传给了TLB填充入口；TLB项按页建立，页内偏移要等真正访问时再由虚拟地址的低12位补上。
+
+为了看TLB具体的存储内容，再在`accel/tcg/cputlb.c:835`的`copy_tlb_helper_locked()`处断下。选择这一行，是因为此时`tn`已经按`vaddr`、`paddr`、`prot`填好，但还没有复制到真正的TLB项，在这里读取`tn`能看到即将写入的字段。
+
+```gdb
+Thread 3 "qemu-system-ris" hit Breakpoint 3, tlb_set_page_with_attrs (cpu=0x5c377104d420, vaddr=18446744072637906944, paddr=2149580800, attrs=..., prot=7, mmu_idx=1, size=4096) at /work/qemu-debug-src/qemu-4.1.1/accel/tcg/cputlb.c:835
+835        copy_tlb_helper_locked(te, &tn);
+(gdb) p/x tn.addr_code
+$21 = 0xffffffffc0200000
+(gdb) p/x tn.addr_read
+$22 = 0xffffffffc0200000
+(gdb) p/x tn.addr_write
+$23 = 0xffffffffc0200400
+```
+
+其中，`addr_code`、`addr_read`、`addr_write`都是`vaddr`的页号，不是`paddr`；而且`addr_write`带`TLB_NOTDIRTY`的标记。
+
+至此，页表遍历、页基址和TLB填充都完成了。接下来的调试过程应该观察TLB的行为。
+
+#### 4.7.6对照实验：分页开启前后的TLB行为
+
+上面的流程是TLB未命中的情况下通过页表遍历翻译得到物理地址的过程。为了对照，先观察分页前的bare模式，再观察分页后Sv39的情况。
+
+##### 分页前（M-mode bare）
+
+重启QEMU，终端2只断`riscv_cpu_tlb_fill()`，终端3不设`kern_init`断点，直接`c`。这样做是因为断在`riscv_cpu_tlb_fill()`能够观察TLB未命中后是如何继续运行，而不设`kern_init`断点是为了让guest从复位开始跑，以观察分页前的第一次取指。
+
+```text
+Thread 3 "qemu-system-ris" hit Breakpoint 1, riscv_cpu_tlb_fill (cs=0x5fdbe566c420, address=4096, size=0, access_type=MMU_INST_FETCH, mmu_idx=3, probe=false, retaddr=0) at /work/qemu-debug-src/qemu-4.1.1/target/riscv/cpu_helper.c:438
+438 {
+```
+
+```gdb
+(gdb) p/x address
+$1 = 0x1000
+(gdb) p access_type
+$2 = MMU_INST_FETCH
+(gdb) p mmu_idx
+$3 = 3
+(gdb) p/x ((CPURISCVState *)cs->env_ptr)->satp
+$4 = 0x0
+(gdb) bt
+#0  riscv_cpu_tlb_fill (cs=0x5fdbe566c420, address=4096, size=0, access_type=MMU_INST_FETCH, mmu_idx=3, probe=false, retaddr=0) at /work/qemu-debug-src/qemu-4.1.1/target/riscv/cpu_helper.c:438
+#1  0x00005fdbd53126cf in tlb_fill (cpu=0x5fdbe566c420, addr=4096, size=0, access_type=MMU_INST_FETCH, mmu_idx=3, retaddr=0) at /work/qemu-debug-src/qemu-4.1.1/accel/tcg/cputlb.c:878
+#2  0x00005fdbd5312d8b in get_page_addr_code (env=0x5fdbe5674e30, addr=4096) at /work/qemu-debug-src/qemu-4.1.1/accel/tcg/cputlb.c:1032
+(gdb) u 451
+451     ret = get_physical_address(env, &pa, &prot, address, access_type, mmu_idx);
+(gdb) p/x env->satp
+$5 = 0x0
+```
+
+`riscv_cpu_tlb_fill()`入口处的局部`env`还没有赋值，直接`p/x env->satp`可能读到未初始化值；这里用`cs->env_ptr`取`satp`，或者先`u 451`再`p/x env->satp`。
+
+其中，`address=0x1000`说明是复位向量；`mmu_idx=3`说明是当前处于M-mode；`satp=0`说明是Bare，还没有Sv39；`access_type=MMU_INST_FETCH`说明是取指。四者合起来，`get_physical_address()`只能走Bare分支，直接返回`addr`，不做页表遍历。需要注意的是，这仍然是一次TLB未命中，进入`tlb_fill()`是因为TLB为空，而不是因为要遍历页表。
+
+分页后的调试需要先把三个终端的状态和操作顺序说清楚。
+
+4.7.5结束时，终端2停在`tlb_set_page_with_attrs()`，guest还没有执行`kern_init`；终端3在等QEMU放行。接下来的顺序是：
+
+- 终端2在当前停点设置`b tlb_fill if addr >= 0xffffffffc0201000`，然后`c`。条件把`kern_init`页`0xffffffffc0200000`过滤掉，只抓后续新页的未命中；它只是地址过滤，不是通用的“页号是否变化”判断。
+- 终端3执行`c`让guest继续。终端3先命中`kern_init`，再执行`c`，内核开始执行`memset`、`dtb_init`、`pmm_init`等，开始访问新页。
+- guest访问新的4KiB页时，`tlb_hit`失败，进入`tlb_fill`，终端2停下；终端2记录`addr`和`access_type`，执行`bt`看调用者，然后`c`；终端3再`c`让guest继续。
+- 同一页的后续访问不会再进入`tlb_fill`，因为`tlb_hit`已经命中；所以终端2每次停下都是未命中，不停就说明还在同一页。
+
+本次依次停下四次。
+
+第一次停下时，地址是0xffffffffc0204ff8，页基址是0xffffffffc0204000，访问类型是`MMU_DATA_STORE`，调用者是`store_helper`，对应启动栈所在页的写：
+
+```text
+Thread 3 "qemu-system-ris" hit Breakpoint 1, tlb_fill (cpu=0x5ee3c9085420, addr=18446744072637927416, size=8, access_type=MMU_DATA_STORE, mmu_idx=1, retaddr=128685172588915) at /work/qemu-debug-src/qemu-4.1.1/accel/tcg/cputlb.c:871
+871     CPUClass *cc = CPU_GET_CLASS(cpu);
+(gdb) p/x addr
+$1 = 0xffffffffc0204ff8
+(gdb) p access_type
+$2 = MMU_DATA_STORE
+(gdb) p mmu_idx
+$3 = 1
+(gdb) bt
+#0  tlb_fill (cpu=0x5ee3c9085420, addr=18446744072637927416, size=8, access_type=MMU_DATA_STORE, mmu_idx=1, retaddr=128685172588915) at /work/qemu-debug-src/qemu-4.1.1/accel/tcg/cputlb.c:871
+#1  0x00005ee3afb30bde in store_helper (big_endian=false, size=8, retaddr=128685172588915, oi=49, val=2147486210, addr=18446744072637927416, env=0x5ee3c908de30) at /work/qemu-debug-src/qemu-4.1.1/accel/tcg/cputlb.c:1522
+```
+
+第二次停下时，地址是0xffffffffc0201876，页基址是0xffffffffc0201000，访问类型是`MMU_INST_FETCH`，调用者是`get_page_addr_code`，对应新代码页的取指：
+
+```text
+Thread 3 "qemu-system-ris" hit Breakpoint 1, tlb_fill (cpu=0x5ee3c9085420, addr=18446744072637913206, size=0, access_type=MMU_INST_FETCH, mmu_idx=1, retaddr=0) at /work/qemu-debug-src/qemu-4.1.1/accel/tcg/cputlb.c:871
+871     CPUClass *cc = CPU_GET_CLASS(cpu);
+(gdb) p/x addr
+$4 = 0xffffffffc0201876
+(gdb) p access_type
+$5 = MMU_INST_FETCH
+(gdb) p mmu_idx
+$6 = 1
+(gdb) bt
+#0  tlb_fill (cpu=0x5ee3c9085420, addr=18446744072637913206, size=0, access_type=MMU_INST_FETCH, mmu_idx=1, retaddr=0) at /work/qemu-debug-src/qemu-4.1.1/accel/tcg/cputlb.c:871
+#1  0x00005ee3afb2ad8b in get_page_addr_code (env=0x5ee3c908de30, addr=18446744072637913206) at /work/qemu-debug-src/qemu-4.1.1/accel/tcg/cputlb.c:1032
+```
+
+第三次停下时，地址是0xffffffffc0206018，页基址是0xffffffffc0206000，访问类型是`MMU_DATA_STORE`，调用者是`store_helper`，对应`memset`写`edata`所在页：
+
+```text
+Thread 3 "qemu-system-ris" hit Breakpoint 1, tlb_fill (cpu=0x5ee3c9085420, addr=18446744072637931544, size=1, access_type=MMU_DATA_STORE, mmu_idx=1, retaddr=128685172589655) at /work/qemu-debug-src/qemu-4.1.1/accel/tcg/cputlb.c:871
+871     CPUClass *cc = CPU_GET_CLASS(cpu);
+(gdb) p/x addr
+$7 = 0xffffffffc0206018
+(gdb) p access_type
+$8 = MMU_DATA_STORE
+(gdb) p mmu_idx
+$9 = 1
+(gdb) bt
+#0  tlb_fill (cpu=0x5ee3c9085420, addr=18446744072637931544, size=1, access_type=MMU_DATA_STORE, mmu_idx=1, retaddr=128685172589655) at /work/qemu-debug-src/qemu-4.1.1/accel/tcg/cputlb.c:871
+#1  0x00005ee3afb2e834 in store_helper (big_endian=false, size=1, retaddr=128685172589655, oi=1, val=0, addr=18446744072637931544, env=0x5ee3c908de30) at /work/qemu-debug-src/qemu-4.1.1/accel/tcg/cputlb.c:1522
+```
+
+第四次停下时，地址是0xffffffffc02022fc，页基址是0xffffffffc0202000，访问类型是`MMU_DATA_LOAD`，调用者是`load_helper`，对应rodata所在页的读：
+
+```text
+Thread 3 "qemu-system-ris" hit Breakpoint 1, tlb_fill (cpu=0x5ee3c9085420, addr=18446744072637915900, size=4, access_type=MMU_DATA_LOAD, mmu_idx=1, retaddr=128685172632206) at /work/qemu-debug-src/qemu-4.1.1/accel/tcg/cputlb.c:871
+871     CPUClass *cc = CPU_GET_CLASS(cpu);
+(gdb) p/x addr
+$10 = 0xffffffffc02022fc
+(gdb) p access_type
+$11 = MMU_DATA_LOAD
+(gdb) p mmu_idx
+$12 = 1
+(gdb) bt
+#0  tlb_fill (cpu=0x5ee3c9085420, addr=18446744072637915900, size=4, access_type=MMU_DATA_LOAD, mmu_idx=1, retaddr=128685172632206) at /work/qemu-debug-src/qemu-4.1.1/accel/tcg/cputlb.c:871
+#1  0x00005ee3afb2cc10 in load_helper (full_load=0x5ee3afb2c9da <full_le_ldul_mmu>, code_read=false, big_endian=false, size=4, retaddr=128685172632206, oi=97, addr=18446744072637915900, env=0x5ee3c908de30) at /work/qemu-debug-src/qemu-4.1.1/accel/tcg/cputlb.c:1274
+```
+
+从这四次可以判断：
+
+- 四个`addr`分别落在0xffffffffc0204000、0xffffffffc0201000、0xffffffffc0206000、0xffffffffc0202000四个不同的4KiB页，都是新页，不是`kern_init`所在的0xffffffffc0200000页。
+- `access_type`依次是`MMU_DATA_STORE`、`MMU_INST_FETCH`、`MMU_DATA_STORE`、`MMU_DATA_LOAD`，说明不只取指，数据读写新页也会未命中。
+- `bt`的`#1`分别是`store_helper`、`get_page_addr_code`、`store_helper`、`load_helper`，说明这四次未命中来自不同的访问路径。
+- `kern_init`页在条件过滤下没有再停；结合`tlb_hit`按虚拟页号比较的逻辑，同一页后续取指应命中TLB，只有新页才重新走表。
+
+本次用条件`addr >= 0xffffffffc0201000`过滤掉`kern_init`所在页；条件只是过滤器，不是通用的“新页”判断。若要观察`sfence.vma`后同一页重新未命中，应改用`b tlb_fill if addr == 0xffffffffc02000d6`。
+
+`sfence.vma`之后当前TB可能继续执行，直到当前TB退出、下一次TB/TLB查找时才重新未命中。
+
+#### 4.7.7总结：一次访存的完整链路与QEMU软件TLB
+
+这一步的目的是确认前面的翻译确实让guest执行到了`kern_init`：终端2的第二次命中只完成取指地址的TLB填充，guest指令还没有执行；终端3的软件断点命中才说明指令真正运行。终端3在终端2放行后命中：
+
+```text
+Breakpoint 1, kern_init () at kern/init/init.c:30
+30      memset(edata, 0, end - edata);
+```
+
+```gdb
+(gdb) p/x $pc
+$1 = 0xffffffffc02000d6
+(gdb) x/3i $pc
+=> 0xffffffffc02000d6 <kern_init>:      auipc   a0,0x6
+   0xffffffffc02000da <kern_init+4>:    addi    a0,a0,-190
+   0xffffffffc02000de <kern_init+8>:    auipc   a2,0x6
+```
+
+完整页表查询过程如下。
+
+客户机取指VA 0xffffffffc02000d6。TCG先用`tlb_hit(entry->addr_code, addr)`查软TLB，发现该4KiB页没有有效项，TLB未命中，按照`get_page_addr_code -> tlb_fill -> riscv_cpu_tlb_fill -> get_physical_address`的调用链通过遍历页表查询物理地址。
+
+`satp=0x8000000000080205`，MODE=8（Sv39），PPN=0x80205，所以根页表基址`base=0x80205 << 12=0x80205000`。VA的`VPN2=(VA >> 30) & 0x1ff=0x1ff`，索引`root[511]`，`pte_addr=0x80205000+0x1ff*8=0x80205ff8`。读出`PTE=0x200000cf`，PPN=0x80000，R/W/X=1，说明它是叶子PTE；它位于根级，所以映射1GiB页，物理基址是0x80000000。
+
+1GiB叶子的页内偏移是VA的低30位0x2000d6，所以`0x80000000+0x2000d6=0x802000d6`。但QEMU的TLB是4KiB粒度，不能直接缓存1GiB项，所以`get_physical_address()`在返回前伪造一个4KiB叶子翻译：把VA的低18位VPN并进PPN，得到`pa=0x80200000`。这不是guest页表里真的有一个4KiB PTE，也不是分配了一个4KiB物理页。`prot=0x7`，返回0，表示翻译成功。
+
+TLB的作用在`tlb_set_page`之后体现。`riscv_cpu_tlb_fill()`把`vaddr=0xffffffffc0200000`、`paddr=0x80200000`、`prot=0x7`交给`tlb_set_page()`，`tlb_set_page_with_attrs()`构造`CPUTLBEntry`：`addr_code/addr_read/addr_write`都是虚拟页号，`addr_write`带`TLB_NOTDIRTY`，`addend`是host地址偏移。之后同一4KiB页再次取指时，`tlb_hit`比较`addr_code`和VA页号，命中就直接用`addr+addend`，不再进入`get_physical_address()`；访问新页时才再次`tlb_fill`，重新走页表。`sfence.vma`会执行`tlb_flush`；当前TB可能继续跑，直到下一次TB/TLB查找才重新miss，这一点是从源码/TCG机制推断的，没有在本次运行中直接断`helper_tlb_flush`。
+
+对应关系上，真实`satp`对应`env->satp`，真实页表对应guest RAM里的PTE，真实TLB对应`CPUTLBEntry`加victim TLB；`tlb_hit()`是命中判断，`tlb_fill()`用于通过遍历页表查询物理地址，`tlb_set_page()`是填TLB。
+
+#### 4.7.8抓马点
+
+1. 第一次命中是gdbstub的假翻译：`b kern_init`触发
+   `riscv_cpu_get_phys_page_debug -> get_physical_address`，`access_type=0,
+   mmu_idx=3, satp=0`，`bt`是`gdb_breakpoint_insert`；`u 252`会回到调用者，
+   `p levels`报`No symbol "levels"`。识别后`c`跳过。
+2. `pa`是页基址：返回0x80200000，不是最终PA 0x802000d6；
+   完整PA = `pa | (VA & 0xfff)` = 0x802000d6，页内偏移由TLB/虚拟地址补上。
+3. `fin`后`ret`还是1：`fin`停在赋值语句执行前，真正返回值看
+   `Value returned is $n = 0`。
+4. `sfence.vma`后当前TB继续执行：从QEMU源码/TCG Translation Block机制看，
+   当前TB不会立刻重新翻译；下一次TB/TLB查找才重新miss，不一定是新页。
+5. `riscv_cpu_tlb_fill`入口的`env`尚未赋值：在该函数第一行断下时，
+   局部`env`还没有执行`CPURISCVState *env = &cpu->env;`，直接`p/x env->satp`
+   可能得到未初始化值；应使用`p/x ((CPURISCVState *)cs->env_ptr)->satp`，
+   或先`u 451`再`p/x env->satp`。本次bare观察直接`p/x env->satp`得到
+   `$4 = 0x6c74006b636f6c6e`；换用`cs->env_ptr`后得到`$4 = 0x0`。
 
 ## 五、测试与验证
 
@@ -1380,6 +1809,6 @@ Buddy 可以直接从阶数与物理页号计算伙伴，合并无需扫描全�
 
 提示词明确 Page 字段含义、取整方式、释放约定、代码目录和不可修改的测试，有助于避免生成结果与框架不兼容。对于日志疑问也结合最终检查判断，gmake 目录信息和手动退出 QEMU 的结束信息不代表实验失败。
 
-**唐涵城、尤祺乐：** 如需补充个人 AI 使用经验，由本人根据实际过程填写。
+**尤祺乐：** 本次分支任务用双GDB观察QEMU的Sv39翻译和TLB。先让AI对照QEMU 4.1.1源码梳理调用链，再按三终端流程实际运行；每次AI给出结论后都用GDB输出验证。第一次命中的`access_type=0/mmu_idx=3/satp=0`与`gdb_breakpoint_insert`调用栈说明它是gdbstub的假翻译；AI最初建议加`access_type == 2`过滤，我改为保留该现象并在报告中列为抓马点。bare观察时还发现`riscv_cpu_tlb_fill`入口的`env`未初始化，改用`cs->env_ptr`取`satp`。这些过程说明AI适合定位源码和生成调试步骤，但结论必须回到实际输出和源码核对。
 
 ---
