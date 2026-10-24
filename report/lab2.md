@@ -1314,7 +1314,7 @@ Total Score: 20/20
 
 **官方评测通过截图：**
 
-![官方评分通过：Page Init 与 Best-Fit 均为 OK，总分 20/20](./OS/report/images/通过测试.png)
+![官方评分通过：Page Init 与 Best-Fit 均为 OK，总分 20/20](./images/通过测试.png)
 
 其中：
 
