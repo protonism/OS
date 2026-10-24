@@ -5,6 +5,9 @@
 #include <string.h>
 #include <dtb.h>
 
+// 引入slub头文件 -lzs
+#include <slub.h>
+
 int kern_init(void) __attribute__((noreturn));
 void grade_backtrace(void);
 void print_kerninfo(void);
@@ -38,6 +41,9 @@ int kern_init(void) {
 
     // grade_backtrace();
     pmm_init();  // init physical memory management
+                 //先初始化并测试底层页分配器 -lzs
+    slub_init(); // 再初始化对象缓存 -lzs
+    slub_check();// 最后测试对象分配器 -lzs
 
     /* do nothing */
     while (1)
