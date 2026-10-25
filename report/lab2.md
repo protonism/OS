@@ -1203,7 +1203,7 @@ Thread 1 "qemu-system-ris" hit Breakpoint 1, get_physical_address (env=0x5a7dc86
 158     {
 ```
 
-（截图：`images/first-false-hit.png`）
+![第一次命中断点：终端2停在 get_physical_address() 入口](./images/first-false-hit.png)
 
 经过与大模型的探讨，根据输出显示，本次调用`get_physical_address()`的条件有诸多疑点：
 
@@ -1250,7 +1250,7 @@ Thread 3 "qemu-system-ris" hit Breakpoint 1, get_physical_address (env=0x5a7dc86
 
 此时，终端1显示了OpenSBI固件的相关信息。
 
-（截图：`images/second-real-hit.png`）
+![第二次命中断点：终端1已显示 OpenSBI 启动信息](./images/second-real-hit.png)
 
 本次调用既然成功输出了OpenSBI固件的相关信息，说明代码应当进入了启动内核阶段，本次断点命中很可能是因为页表查询相关。除此之外，以下数据也能佐证这一判断：
 
@@ -1298,7 +1298,7 @@ $5 = 0x8
 $6 = 0x80205ff8
 ```
 
-（截图：`images/walk.png`）
+![单步页表遍历：satp、base、idx 与 pte_addr 的取值](./images/walk.png)
 
 解析satp寄存器，可以得到根页表所在的4KiB页的PPN为0x80205，`base = satp.PPN << 12 = 0x80205000`。由于我们是从函数入口直接走到读取PTE的位置，这里停在第一轮循环，`idx=0x1ff`，读的是根页表项。此时`pte_addr = base + idx * ptesize = 0x80205ff8`，满足`base = satp.PPN << 12`与`pte_addr = base + idx * ptesize`。
 
@@ -1339,7 +1339,7 @@ $11 = 0x1
 $12 = 0x802000d6
 ```
 
-（截图：`images/pte-pa.png`）
+![get_physical_address() 返回的页基址 pa 与完整物理地址验证](./images/pte-pa.png)
 
 可以看出，`pa=0x80200000`是对应的4KiB页物理基址，`pa | (address & 0xfff) = 0x802000d6`就是完整物理地址。接下来要确认这个页基址是否进入TLB。
 
