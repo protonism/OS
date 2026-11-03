@@ -1,0 +1,24 @@
+.gitgnore
+
+# 编译产物
+*.o
+*.d
+*.bin
+*.elf
+*.map
+
+# 生成的内核镜像
+bin
+/bin
+obj
+/obj
+
+# 编辑器/系统文件
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# 日志和临时文件
+*.log
+tmp/

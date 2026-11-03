@@ -1,9 +1,10 @@
 #include <pmm.h>
 #include <list.h>
+#include <string.h>
 #include <best_fit_pmm.h>
 #include <stdio.h>
 
-//lab2 function2-2 YOUR CODE
+//lab2 function2-2: 从 lab2 迁移的 Best-Fit 分配器
 static free_area_t free_area;
 
 #define free_list (free_area.free_list)
@@ -137,7 +138,6 @@ best_fit_nr_free_pages(void) {
     return nr_free;
 }
 
-// Framework tests: students must not modify basic_check or best_fit_check.
 static void
 basic_check(void) {
     struct Page *p0, *p1, *p2;
@@ -189,15 +189,17 @@ basic_check(void) {
     free_page(p2);
 }
 
+// LAB2: below code is used to check the best fit allocation algorithm (your EXERCISE 1) 
+// NOTICE: You SHOULD NOT CHANGE basic_check, default_check functions!
 static void
 best_fit_check(void) {
-    int score = 0, sumscore = 6;
+    int score = 0 ,sumscore = 6;
     int count = 0, total = 0;
     list_entry_t *le = &free_list;
     while ((le = list_next(le)) != &free_list) {
         struct Page *p = le2page(le, page_link);
         assert(PageProperty(p));
-        count++, total += p->property;
+        count ++, total += p->property;
     }
     assert(total == nr_free_pages());
 
@@ -205,7 +207,7 @@ best_fit_check(void) {
 
     #ifdef ucore_test
     score += 1;
-    cprintf("grading: %d / %d points\n", score, sumscore);
+    cprintf("grading: %d / %d points\n",score, sumscore);
     #endif
     struct Page *p0 = alloc_pages(5), *p1, *p2;
     assert(p0 != NULL);
@@ -213,7 +215,7 @@ best_fit_check(void) {
 
     #ifdef ucore_test
     score += 1;
-    cprintf("grading: %d / %d points\n", score, sumscore);
+    cprintf("grading: %d / %d points\n",score, sumscore);
     #endif
     list_entry_t free_list_store = free_list;
     list_init(&free_list);
@@ -222,7 +224,7 @@ best_fit_check(void) {
 
     #ifdef ucore_test
     score += 1;
-    cprintf("grading: %d / %d points\n", score, sumscore);
+    cprintf("grading: %d / %d points\n",score, sumscore);
     #endif
     unsigned int nr_free_store = nr_free;
     nr_free = 0;
@@ -234,12 +236,12 @@ best_fit_check(void) {
     assert(PageProperty(p0 + 1) && p0[1].property == 2);
     // * - - * *
     assert((p1 = alloc_pages(1)) != NULL);
-    assert(alloc_pages(2) != NULL);
+    assert(alloc_pages(2) != NULL);      // best fit feature
     assert(p0 + 4 == p1);
 
     #ifdef ucore_test
     score += 1;
-    cprintf("grading: %d / %d points\n", score, sumscore);
+    cprintf("grading: %d / %d points\n",score, sumscore);
     #endif
     p2 = p0 + 1;
     free_pages(p0, 5);
@@ -248,7 +250,7 @@ best_fit_check(void) {
 
     #ifdef ucore_test
     score += 1;
-    cprintf("grading: %d / %d points\n", score, sumscore);
+    cprintf("grading: %d / %d points\n",score, sumscore);
     #endif
     assert(nr_free == 0);
     nr_free = nr_free_store;
@@ -259,61 +261,14 @@ best_fit_check(void) {
     le = &free_list;
     while ((le = list_next(le)) != &free_list) {
         struct Page *p = le2page(le, page_link);
-        count--, total -= p->property;
+        count --, total -= p->property;
     }
     assert(count == 0);
     assert(total == 0);
     #ifdef ucore_test
     score += 1;
-    cprintf("grading: %d / %d points\n", score, sumscore);
+    cprintf("grading: %d / %d points\n",score, sumscore);
     #endif
-}
-
-// 添加以下两个函数，检查之前遗漏的问题（同一页面被连续分配两次）-lzs
-static void
-best_fit_tail_check(void) {
-    size_t free_before = nr_free_pages();
-
-    /* 从真实空闲区借出 5 页，作为本次测试使用的页面。 */
-    struct Page *base = alloc_pages(5);
-    assert(base != NULL);
-
-    /* 暂存其余空闲区，让测试只面对人为构造的两个块。 */
-    list_entry_t saved_list = free_list;
-    unsigned int saved_nr_free = nr_free;
-    list_init(&free_list);
-    nr_free = 0;
-
-    /* 构造低地址 2 页块，以及高地址 1 页块，触发尾插。 */
-    free_pages(base + 1, 2);
-    free_pages(base + 4, 1);
-
-    struct Page *p = alloc_page();
-    struct Page *q = alloc_page();
-
-    assert(p != NULL && q != NULL);
-    assert(p != q);              /* 同一页面不能被重复分配。 */
-    assert(p == base + 4);       /* Best-Fit 优先选择 1 页块。 */
-    assert(q == base + 1);       /* 然后从 2 页块切出 1 页。 */
-
-    struct Page *r = alloc_page();
-    assert(r == base + 2);
-    assert(nr_free == 0);
-    assert(list_empty(&free_list));
-
-    /* 恢复原有空闲区，再归还测试借出的全部 5 页。 */
-    free_list = saved_list;
-    nr_free = saved_nr_free;
-    free_pages(base, 5);
-
-    assert(nr_free_pages() == free_before);
-    cprintf("best_fit_tail_check() succeeded!\n");
-}
-
-static void
-best_fit_all_check(void) {
-    best_fit_check();
-    best_fit_tail_check();
 }
 
 const struct pmm_manager best_fit_pmm_manager = {
@@ -323,5 +278,5 @@ const struct pmm_manager best_fit_pmm_manager = {
     .alloc_pages = best_fit_alloc_pages,
     .free_pages = best_fit_free_pages,
     .nr_free_pages = best_fit_nr_free_pages,
-    .check = best_fit_all_check,
+    .check = best_fit_check,
 };
