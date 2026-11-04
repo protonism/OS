@@ -8,8 +8,10 @@
 #include <riscv.h>
 #include <stdio.h>
 #include <trap.h>
+#include <sbi.h>
 
 #define TICK_NUM 100
+#define SHUTDOWN_AFTER 500 // 5s后关机
 
 static void print_ticks() {
     cprintf("%d ticks\n", TICK_NUM);
@@ -19,10 +21,8 @@ static void print_ticks() {
 #endif
 }
 
-/* idt_init - initialize IDT to each of the entry points in kern/trap/vectors.S
- */
+/* idt_init - initialize IDT to each of the entry points in kern/trap/vectors.S */
 void idt_init(void) {
-
     extern void __alltraps(void);
     /* Set sup0 scratch register to 0, indicating to exception vector
        that we are presently executing in the kernel */
@@ -41,7 +41,8 @@ void print_trapframe(struct trapframe *tf) {
     print_regs(&tf->gpr);
     cprintf("  status   0x%08x\n", tf->status);
     cprintf("  epc      0x%08x\n", tf->epc);
-    cprintf("  badvaddr 0x%08x\n", tf->badvaddr);
+    // cprintf("  badvaddr 0x%08x\n", tf->badvaddr);
+    cprintf("  tval     0x%08x\n", tf->tval);
     cprintf("  cause    0x%08x\n", tf->cause);
 }
 
@@ -81,10 +82,65 @@ void print_regs(struct pushregs *gpr) {
 }
 
 //lab3 function2 YOUR CODE
+//-2413073 thc 负责 interrupt_handler
+void interrupt_handler(struct trapframe *tf){
+    // 将最高位清零，只保留低位的 Cause Code
+    uintptr_t code = tf->cause & ~(1UL << (sizeof(uintptr_t) * 8 - 1));
 
+    switch(code){
+        // IRQ_S_TIMER等在riscv.h里面宏定义
+        case IRQ_S_TIMER: // 5, S 定时器中断
+            clock_set_next_event();
+
+            ticks++;
+            if (ticks % TICK_NUM == 0) print_ticks();
+            if (ticks >= SHUTDOWN_AFTER) sbi_shutdown();
+
+            break;
+            // lab3实验只完成时钟相关中断，其它中断后续实验完成
+        case IRQ_S_EXT: // 9, S 外部中断
+            break;
+        case IRQ_S_SOFT: // 1, S 软件中断
+            cprintf("Supervisor software interrupt\n");
+            break;
+        default:
+            cprintf("Unknown interrupt: cause %d\n", (int)code);
+            break;
+    }
+}
+
+// yql负责 exception_handler
+void exception_handler(struct trapframe *tf){   
+    // RICSV 的指令集是变长的，RVC压缩指令（16位，低2位一定不是11）
+
+    switch (tf->cause) {
+        case CAUSE_ILLEGAL_INSTRUCTION: // 2
+            cprintf("Illegal instruction at %p\n", tf->epc);
+            // 读取当前指令低2位，判断是16位还是32位指令
+            if ((*(uint16_t *)(tf->epc) & 0x3) != 0x3){
+                tf->epc += 2;
+            }
+            else {
+                tf->epc += 4;
+            }
+            break;
+        case CAUSE_BREAKPOINT: // 3(ebreak)
+            cprintf("Breakpoint at %p\n", tf->epc);
+            if ((*(uint16_t *)(tf->epc) & 0x3) != 0x3){
+                tf->epc += 2;
+            }
+            else {
+                tf->epc += 4;
+            }
+            break;
+        default:
+            print_trapframe(tf);
+            break;
+    }
+}
 
 static inline void trap_dispatch(struct trapframe *tf) {
-    if ((intptr_t)tf->cause < 0) {
+    if ((intptr_t)tf->cause < 0) { // 这里使用有符号数比较判断scause的最高位，1就是中断，0就是异常
         // interrupts
         interrupt_handler(tf);
     } else {

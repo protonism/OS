@@ -202,7 +202,7 @@ TOUCH_FILES		:= kern/trap/trap.c
 
 MAKEOPTS		:= --quiet --no-print-directory
 
-GRADE_TMP	:= /tmp/lab3_grade
+GRADE_TMP	:= ~/tmp/lab3_grade
 
 grade:
 	$(V)$(MAKE) $(MAKEOPTS) clean

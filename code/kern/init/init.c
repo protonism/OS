@@ -30,14 +30,14 @@ int kern_init(void) {
 
     pmm_init();  // init physical memory management
 
-    idt_init();  // init interrupt descriptor table
+    // can be deleted, the second idt_init is written here due to our ucore from x86
+    // idt_init();  // init interrupt descriptor table 
 
     clock_init();   // init clock interrupt
     intr_enable();  // enable irq interrupt
 
     /* do nothing */
-    while (1)
-        ;
+    while (1) ;
 }
 
 void __attribute__((noinline))
