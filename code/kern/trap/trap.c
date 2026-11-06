@@ -109,30 +109,28 @@ void interrupt_handler(struct trapframe *tf){
     }
 }
 
-// yql负责 exception_handler
-void exception_handler(struct trapframe *tf){   
-    // RICSV 的指令集是变长的，RVC压缩指令（16位，低2位一定不是11）
-
+// 2413523 尤祺乐 负责exception_handler()实现
+void exception_handler(struct trapframe *tf) {
     switch (tf->cause) {
-        case CAUSE_ILLEGAL_INSTRUCTION: // 2
-            cprintf("Illegal instruction at %p\n", tf->epc);
-            // 读取当前指令低2位，判断是16位还是32位指令
-            if ((*(uint16_t *)(tf->epc) & 0x3) != 0x3){
+        case CAUSE_ILLEGAL_INSTRUCTION:
+            cprintf("Illegal instruction at %p\n", (void *)tf->epc);
+            // 低两位为 0b11 表示 32 位指令，否则为 16 位压缩指令
+            if ((*(uint16_t *)tf->epc & 0x3) != 0x3) {
                 tf->epc += 2;
-            }
-            else {
+            } else {
                 tf->epc += 4;
             }
             break;
-        case CAUSE_BREAKPOINT: // 3(ebreak)
-            cprintf("Breakpoint at %p\n", tf->epc);
-            if ((*(uint16_t *)(tf->epc) & 0x3) != 0x3){
+
+        case CAUSE_BREAKPOINT:
+            cprintf("Breakpoint at %p\n", (void *)tf->epc);
+            if ((*(uint16_t *)tf->epc & 0x3) != 0x3) {
                 tf->epc += 2;
-            }
-            else {
+            } else {
                 tf->epc += 4;
             }
             break;
+
         default:
             print_trapframe(tf);
             break;
