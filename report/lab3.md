@@ -98,117 +98,100 @@ kern_init()
 
 ## 四、实验内容与实现
 
-### 4.1 功能模块一：Trap 底层（Trap frame、入口与返回）
+### 4.1 功能模块一：Trap 底层（RESTORE_ALL 与 __alltraps）
 
 **负责人：** 2413576-林泽森。
 
-#### （1）trapframe 布局
+本实验完成了 `kern/trap/trapentry.S` 中标注 `#lab3 function1` 的两处代码：`RESTORE_ALL` 宏和 `__alltraps` 中调用 `trap()` 的部分。`SAVE_ALL`、trapframe 布局和 `stvec` 初始化由骨架提供。
 
-`struct trapframe` 在 `kern/trap/trap.h` 中定义，`struct pushregs` 按 RISC-V 通用寄存器编号排列：
+**Spec：**
 
-| 偏移 | 内容 |
-|------|------|
-| 0 ~ 255 | `gpr.zero, ra, sp, gp, tp, t0..t6, s0..s11, a0..a7`（32 个 8 字节槽位） |
-| 256 | `status`（保存 `sstatus`） |
-| 264 | `epc`（保存/恢复 `sepc`） |
-| 272 | `tval`（保存 `stval`，旧名 `badvaddr`） |
-| 280 | `cause`（保存 `scause`） |
-| 合计 | 288 字节 = 36 × 8，仍保持 16 字节栈对齐 |
+```text
+文件：kern/trap/trapentry.S
+1. RESTORE_ALL：从 trapframe 偏移 32/33 读取 sstatus/sepc，并 csrw 写回；
+   恢复 x1、x3~x31；x0 不恢复；sp 最后从偏移 2 恢复。
+2. __alltraps：SAVE_ALL 之后 mv a0, sp; call trap；
+   trap() 返回后自然落到 __trapret，执行 RESTORE_ALL 和 sret。
+3. 不修改 SAVE_ALL 和 trapframe 布局；__alltraps 保持 4 字节对齐。
+```
 
-#### （2）SAVE_ALL
+**Prompt：**
 
-`SAVE_ALL` 先执行 `csrw sscratch, sp` 暂存进入 trap 前的栈指针，然后 `sp -= 36 * REGBYTES` 分配 trapframe，保存 `x0, x1, x3..x31`。随后用 `csrrw s0, sscratch, x0` 取回原 `sp`，同时把 `sscratch` 清零，最后保存 `sstatus`、`sepc`、`stval`、`scause` 到偏移 32~35。
+```text
+请完成 kern/trap/trapentry.S 中 lab3 function1 的两处代码。第一处是 RESTORE_ALL：从 trapframe 中恢复 sstatus 和 sepc 并写回 CSR，恢复 x1、x3~x31，x0 不需要恢复，sp 必须最后从偏移 2 恢复；第二处是 __alltraps：在 SAVE_ALL 之后把 sp 作为 trapframe 指针传给 trap()，即 mv a0, sp; call trap。不要修改 SAVE_ALL 和 trapframe 布局，并解释 CSR 写回顺序和 sp 恢复顺序。
+```
 
-`x2`（sp）不直接保存，而是把原 `sp` 存到偏移 2；`sscratch` 清零的约定用于说明“当前已经在内核态”，lab3 还没有用户态程序，因此不需要判断 trap 来自用户态。
-
-#### （3）RESTORE_ALL
+**实现：**
 
 ```asm
     .macro RESTORE_ALL
-    # 先恢复 CSR：sstatus、sepc
     LOAD s1, 32*REGBYTES(sp)
     LOAD s2, 33*REGBYTES(sp)
     csrw sstatus, s1
     csrw sepc, s2
 
-    # 恢复通用寄存器，x0 硬连线为 0，不需要恢复
     LOAD x1, 1*REGBYTES(sp)
     LOAD x3, 3*REGBYTES(sp)
-    ...
+    ...                       # x4~x31 按同样方式恢复
     LOAD x31, 31*REGBYTES(sp)
 
-    # sp 必须最后恢复
-    LOAD x2, 2*REGBYTES(sp)
+    LOAD x2, 2*REGBYTES(sp)   # sp 最后恢复
     .endm
-```
 
-关键点：
-
-- `sstatus` 和 `sepc` 必须先写入 CSR。`sepc` 可能被异常处理修改（例如断点/非法指令后 `epc += 2/4`），所以不能只从栈上读出来而不写回。
-- `sstatus` 保存的是 trap 进入时硬件已经清掉 `SIE` 的值，因此恢复过程中不会再次响应中断；`sret` 再从 `SPIE` 恢复原来的中断使能状态。
-- `sp` 最后用 `LOAD x2, 2*REGBYTES(sp)` 恢复，和 `SAVE_ALL` 中保存的原 `sp` 对应；不能既 `LOAD x2` 又 `addi sp, sp, 288`，否则会重复调整。
-- `x0` 不恢复；`stval/scause` 是只读输入 CSR，不需要写回。
-
-#### （4）__alltraps 与 C 函数传参
-
-```asm
 __alltraps:
     SAVE_ALL
-
-    mv a0, sp       # trap(struct trapframe *tf) 的第一个参数
-    call trap       # 进入 C 语言 trap()
-
-    .globl __trapret
+    mv a0, sp
+    call trap
 __trapret:
     RESTORE_ALL
     sret
 ```
 
-`call trap` 会破坏 `ra`，但 `ra` 已经在 trapframe 中保存，`RESTORE_ALL` 会恢复；`trap()` 返回后自然落到 `__trapret`，执行 `sret`。
+**说明与真实问题：**
 
-#### （5）验证
+- `sstatus` 和 `sepc` 不能只从 trapframe `LOAD`，必须 `csrw` 写回 CSR，否则 `sret` 使用的是旧值。
+- `sp` 必须最后恢复；不能再额外 `addi sp, sp, 288`，否则会重复调整栈指针。
+- 原骨架的 `csrr s3, sbadaddr` 在当前 binutils 2.45 下报 `unknown CSR 'sbadaddr'`，改为 `csrr s3, stval`，同时把 `trap.h` 的字段改名为 `tval`。
+- `call trap` 会破坏 `ra`，但 `ra` 已保存在 trapframe 中，`RESTORE_ALL` 会恢复。
+- Test 1 通过（35/35），验证 26 个通用寄存器、sp、C 函数传参和断点返回。
 
-`make grade` 的 Test 1 通过（35/35）。`test_lab3_register_context` 在触发 `ebreak` 前把 26 个通用寄存器设置为 `0x105~0x11f`，trap 返回后逐一比较，能够同时验证：
-
-- `SAVE_ALL/RESTORE_ALL` 的寄存器保存与恢复；
-- 栈指针恢复（trapframe 大小 288 字节，16 字节对齐）；
-- `mv a0, sp; call trap` 的 C 函数传参；
-- `sstatus/sepc` 写回与 `sret` 返回；
-- 断点异常处理后 `sepc` 前进，返回不会重复执行 `ebreak`。
-
-#### （6）第 153 页扩展思考：stvec 模式编码、四字节对齐与向后兼容
-
-RISC-V 的 `stvec` 低两位是模式字段：
-
-- `MODE = 0`：Direct 模式，所有 trap 都跳到 `BASE`；
-- `MODE = 1`：Vectored 模式，中断跳到 `BASE + 4 × cause`，异常仍然跳到 `BASE`；
-- 其他编码保留。
-
-因此 `BASE` 必须 4 字节对齐，低两位恒为 0，才能和模式字段共存。本实验的 `__alltraps` 使用 `.align(2)` 保证 4 字节对齐，`idt_init()` 直接 `write_csr(stvec, &__alltraps)`，即 Direct 模式：
-
-```c
-write_csr(sscratch, 0);
-write_csr(stvec, &__alltraps);
-```
-
-Direct 模式的优点是实现简单、只需要一个入口，适合当前“先保存现场再在 C 里按 `scause` 分发”的结构；Vectored 模式可以减少 C 侧的分支，但需要为每个中断准备 4 字节对齐的入口表，异常仍要回到统一入口。二者可以共存：`SAVE_ALL`/trapframe/`trap()` 的流程不变，只在 `stvec` 的写入方式和入口表布局上不同。对旧平台保持 `MODE = 0` 即可向后兼容；如果后续要使用 Vectored 模式，需要保证 `BASE` 对齐、入口地址正确，并在 `idt_init()` 中显式设置模式位，不能依赖地址低位。
+第 153 页的思考题简要回答：`stvec` 低两位是 MODE，0 为 Direct、1 为 Vectored；`BASE` 必须 4 字节对齐，因此 `__alltraps` 用 `.align(2)`，`idt_init()` 写入 `&__alltraps` 就是 Direct 模式。扩展到 Vectored 时只要保证入口表 4 字节对齐、中断入口地址为 `BASE + 4 * cause`，异常仍然回到 `BASE`，旧平台继续用 Direct 即可保持兼容。
 
 ---
 
-### 4.2 功能模块二：中断与时钟、Lab2 迁移
+### 4.2 功能模块二：中断与时钟（interrupt_handler）
 
 **负责人：** 2413073-唐涵城。
 
-#### （1）interrupt_handler
+本实验完成了 `kern/trap/trap.c` 中标注 `//lab3 function2` 的 `interrupt_handler()`。`clock.c` 的 `clock_init()` 和 `clock_set_next_event()` 由骨架提供；Lab2 部分只迁移了 `page_init()` 和 Best-Fit，并把 `init_pmm_manager()` 切换到 `best_fit_pmm_manager`，保证 `pmm_init()` 能正常完成。
+
+**Spec：**
+
+```text
+文件：kern/trap/trap.c
+1. interrupt_handler(tf)：先清除 scause 最高位，只保留 cause code；
+2. IRQ_S_TIMER：每次调用 clock_set_next_event()，ticks++，
+   每 100 次调用 print_ticks()，达到 500 次调用 sbi_shutdown()；
+3. IRQ_S_SOFT：输出 Supervisor software interrupt；
+   其他：输出 Unknown interrupt: cause N；
+4. 输出字符串要和 tools/grade.sh 的 grep 目标一致。
+```
+
+**Prompt：**
+
+```text
+请完成 kern/trap/trap.c 中 lab3 function2 的 interrupt_handler()：先清除 scause 的最高位，再按中断类型分发；时钟中断每次都要调用 clock_set_next_event() 重新设置下一次事件，ticks++，每 100 次打印一次，达到 500 次调用 sbi_shutdown()；软件中断输出 Supervisor software interrupt，未知中断输出 Unknown interrupt: cause N。不要修改 SAVE_ALL/trapframe，输出字符串要匹配 tools/grade.sh。
+```
+
+**实现：**
 
 ```c
 void interrupt_handler(struct trapframe *tf) {
-    // 清除 scause 最高位，只保留 Cause Code
     uintptr_t code = tf->cause & ~(1UL << (sizeof(uintptr_t) * 8 - 1));
 
     switch (code) {
     case IRQ_S_TIMER:
-        clock_set_next_event();          // 先设置下一次事件
+        clock_set_next_event();
         ticks++;
         if (ticks % TICK_NUM == 0) print_ticks();
         if (ticks >= SHUTDOWN_AFTER) sbi_shutdown();
@@ -217,7 +200,7 @@ void interrupt_handler(struct trapframe *tf) {
         cprintf("Supervisor software interrupt\n");
         break;
     case IRQ_S_EXT:
-        break;                           // 外部中断后续实验再处理
+        break;
     default:
         cprintf("Unknown interrupt: cause %d\n", (int)code);
         break;
@@ -225,139 +208,15 @@ void interrupt_handler(struct trapframe *tf) {
 }
 ```
 
-时钟分支的顺序很重要：每次进入时钟中断都调用 `clock_set_next_event()` 重新设置下一次事件，否则定时器只触发一次；然后累加 `ticks`，每 100 次输出一次，达到 `SHUTDOWN_AFTER` 后调用 `sbi_shutdown()`。
+**说明与真实问题：**
 
-当前实现中：
+- 真实时钟中断的 `scause` 最高位是 1（例如 `0x8000000000000005`），不能直接 `switch (tf->cause)`，否则会进入 `default`；要先 `tf->cause & ~(1UL << 63)`。
+- 定时器事件只设置一次的话，时钟只会触发一次，`ticks` 停在 1；所以每次 `IRQ_S_TIMER` 都要调用 `clock_set_next_event()`。
+- `SHUTDOWN_AFTER = 500`，QEMU 的 timebase 是 10 MHz、`timebase = 100000`，所以 500 ticks 约 5 秒，正常输出 5 次 `100 ticks` 后关机。
+- 评测脚本用 `grep -F` 精确匹配 `100 ticks`、`Supervisor software interrupt`、`Unknown interrupt: cause 15` 等字符串，输出格式不能随意改。
+- Lab2 迁移部分：`page_init()` 从 lab2 原样迁入；`best_fit_pmm.c` 补 `free_area` 和分配器函数；`entry.S` 补低地址恒等映射；Makefile 和 `grade.sh` 使用 `-kernel`。`pmm.c` 的 `local_intr_save/restore` 包装保持不变，分配接口仍有中断保护。
 
-```c
-#define TICK_NUM 100
-#define SHUTDOWN_AFTER 500   // 5 秒后关机
-```
-
-QEMU 的 timebase 是 10 MHz，`clock.c` 中 `timebase = 100000`，因此每个 tick 为 10 ms，100 ticks 约 1 秒，500 ticks 约 5 秒。
-
-#### （2）clock 模块
-
-```c
-volatile size_t ticks;
-
-static inline uint64_t get_cycles(void) {
-    uint64_t n;
-    __asm__ __volatile__("rdtime %0" : "=r"(n));
-    return n;
-}
-
-static uint64_t timebase = 100000;
-
-void clock_init(void) {
-    set_csr(sie, MIP_STIP);      // 使能 S 模式定时器中断
-    clock_set_next_event();      // 设置第一次事件
-    ticks = 0;
-    cprintf("++ setup timer interrupts\n");
-}
-
-void clock_set_next_event(void) {
-    sbi_set_timer(get_cycles() + timebase);
-}
-```
-
-`clock_init()` 只负责使能 `sie.STIE`、设置第一次事件并清零计数；真正让时钟持续工作的是 `interrupt_handler()` 中的每次重新设置事件。
-
-#### （3）Lab2 缺失代码迁移
-
-lab3 骨架中与 Lab2 相关的缺失内容及迁移结果：
-
-| 文件 | 迁移内容 | 说明 |
-|------|----------|------|
-| `kern/mm/pmm.c` | `page_init()` | 从 lab2 原样迁移：设置 `va_pa_offset`、从 DTB 取内存范围、建立 `Page` 数组、保留内核和描述符数组、注册空闲页 |
-| `kern/mm/pmm.c` | `init_pmm_manager()` | 由 `default_pmm_manager` 改为 `best_fit_pmm_manager` |
-| `kern/mm/best_fit_pmm.c` | `free_area`、`best_fit_init/init_memmap/alloc_pages/free_pages/nr_free_pages`、`best_fit_pmm_manager` | 使用 lab2 已测试的分配器实现；保留 lab3 骨架自带的 `basic_check/best_fit_check` 不动 |
-| `kern/init/entry.S` | 低地址恒等映射 | 根页表索引 2 映射 `0x80000000-0xbfffffff`，解决写入 `satp` 后的取指问题 |
-| `code/Makefile` | `-device loader` -> `-kernel` | 适配 QEMU 7 + OpenSBI |
-| `code/tools/grade.sh` | `-device loader` -> `-kernel` | 让本仓库的评分脚本能在当前 QEMU 下启动内核 |
-
-迁移时保留了 `pmm.c` 原有的中断保护包装，没有采用 lab2 中不带保护的 `alloc_pages/free_pages` 直接转发版本：
-
-```c
-struct Page *alloc_pages(size_t n) {
-    struct Page *page = NULL;
-    bool intr_flag;
-    local_intr_save(intr_flag);
-    {
-        page = pmm_manager->alloc_pages(n);
-    }
-    local_intr_restore(intr_flag);
-    return page;
-}
-```
-
-`free_pages()` 和 `nr_free_pages()` 同样被 `local_intr_save/restore` 包住。
-
-Lab2 的 Buddy System 和 SLUB 没有迁移进 lab3 骨架：它们不是 lab3 的必要路径，lab3 骨架也没有对应源文件和 Makefile 入口；这部分仍保留在 lab2 分支。
-
-`page_init()` 的关键不变量：
-
-1. 先设置 `va_pa_offset = PHYSICAL_MEMORY_OFFSET`，后面的 `PADDR` 依赖它；
-2. `npage = PPN(mem_base + mem_size)` 是内存末尾的绝对页号，不是页数；
-3. `Page` 数组放在内核 `end` 之后按页对齐的位置，定位物理地址必须用 `PADDR(pages)`；
-4. 数组位于 `.bss` 之外，`kern_init()` 的 `memset` 不会清零它，必须显式初始化并标记 `PG_reserved`；
-5. 首个完整空闲页为 `ROUNDUP(page_array_end, PGSIZE)`，与 `mem_base` 取较大值后注册给 `init_memmap()`。
-
-#### （4）内存分配接口的中断保护
-
-`kern/sync/sync.h` 中的实现：
-
-```c
-static inline bool __intr_save(void) {
-    if (read_csr(sstatus) & SSTATUS_SIE) {
-        intr_disable();
-        return 1;
-    }
-    return 0;
-}
-
-static inline void __intr_restore(bool flag) {
-    if (flag) {
-        intr_enable();
-    }
-}
-
-#define local_intr_save(x) \
-    do {                   \
-        x = __intr_save(); \
-    } while (0)
-#define local_intr_restore(x) __intr_restore(x);
-```
-
-`__intr_save()` 读取 `sstatus.SIE`，只有原来开启中断时才关闭并返回 1；`__intr_restore()` 只在原来开启过中断时才重新开启。因此嵌套的临界区不会提前开中断：内层保存到 0，内层恢复不动作，外层恢复才真正开中断。
-
-当前 lab3 的时钟中断处理函数不分配内存，因此不会出现“中断处理程序与主流程同时操作空闲链表”的真实竞争；但 `alloc_pages/free_pages/nr_free_pages` 的保护仍然保留，为后续实验和中断上下文中的分配提供单核下的互斥保证。该保护只适用于单 hart；多核还需要额外的 spinlock。
-
-#### （5）第 171 页 do { … } while (0) 思考题
-
-`local_intr_save(x)` 使用 `do { … } while (0)`，原因主要有三点：
-
-1. **让宏表现得像一条语句。** 调用者写 `local_intr_save(flag);` 时，末尾分号会被 `do … while (0)` 吸收，宏整体仍然是一个完整语句。
-2. **保证 `if/else` 安全。** 如果写成 `#define local_intr_save(x) { x = __intr_save(); }`，那么：
-
-   ```c
-   if (cond)
-       local_intr_save(flag);
-   else
-       ...
-   ```
-
-   展开后会变成 `if (cond) { ... }; else ...`，多出来的分号是一个空语句，`else` 失去匹配的 `if`，编译失败。`do { … } while (0)` 不会产生这个问题；如果宏内部有多条语句，裸写更会让 `if` 只保护第一条语句。
-3. **只执行一次，同时保留作用域和提前退出语义。** `while (0)` 保证循环体恰好执行一次；宏内部的局部变量不会泄漏到调用者作用域；如果宏内部需要提前退出，`break` 只会跳出这个 `do … while (0)`，不会误跳出调用者所在的外层循环。它也是标准 C，不依赖 GNU 的 `({ … })` 语句表达式。
-
-`local_intr_restore(x)` 目前写成 `#define local_intr_restore(x) __intr_restore(x);`。它只有一次函数调用，在 `pmm.c` 的花括号代码块中这样写没有问题；但这个宏自带末尾分号，如果直接放进不带花括号的 `if/else`，会展开成 `if (cond) __intr_restore(flag);; else ...`，同样会破坏 `else` 的配对。更对称、更安全的写法是：
-
-```c
-#define local_intr_restore(x) \
-    do { __intr_restore(x); } while (0)
-```
-
-或者直接写成 `static inline void local_intr_restore(bool flag)`。本实验保持骨架原样，调用点都在花括号块内，因此行为正确；报告里记录这一点作为宏定义的思考。
+第 171 页的思考题简要回答：`local_intr_save` 用 `do { … } while (0)` 把宏变成一条完整语句，调用者可以正常写分号；在 `if/else` 中不会因为多出的花括号分号破坏 `else` 的配对，`while (0)` 保证只执行一次，还允许宏内部 `break`。`local_intr_restore` 目前是带末尾分号的普通宏，在花括号块里没问题，但放进不带花括号的 `if/else` 会多出一个空语句，建议也改成 `do { … } while (0)`。`__intr_save/__intr_restore` 用 bool 标志保存原来的 `SIE`，嵌套时内层恢复不会提前开中断，外层恢复才真正打开。
 
 ---
 
