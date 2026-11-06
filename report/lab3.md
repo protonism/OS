@@ -365,39 +365,45 @@ static inline void __intr_restore(bool flag) {
 
 **负责人：** 2413523-尤祺乐。
 
+根据指导书的要求，采用以下提示词以定义函数`exception_handler()`：
+
+```text
+请完成kern/trap/trap.c的exception_handler()的实现，应该根据tf->cause区分非法指令异常、断点异常以及其他异常，前两种异常需要输出指定格式的消息，你可以查找make grade对应的测试以寻找具体的格式，并根据riscv消息的格式解析指令的长度，正确更新tf->epc。最后一类异常只需要调用print_trapframe()输出栈帧。
+```
+
+完成的实现如下：
+
 ```c
+// 2413523 尤祺乐 负责exception_handler()实现
 void exception_handler(struct trapframe *tf) {
     switch (tf->cause) {
-    case CAUSE_ILLEGAL_INSTRUCTION:
-        cprintf("Illegal instruction at %p\n", tf->epc);
-        if ((*(uint16_t *)(tf->epc) & 0x3) != 0x3) {
-            tf->epc += 2;   // RVC 16 位指令
-        } else {
-            tf->epc += 4;   // 32 位指令
-        }
-        break;
-    case CAUSE_BREAKPOINT:
-        cprintf("Breakpoint at %p\n", tf->epc);
-        if ((*(uint16_t *)(tf->epc) & 0x3) != 0x3) {
-            tf->epc += 2;
-        } else {
-            tf->epc += 4;
-        }
-        break;
-    default:
-        print_trapframe(tf);
-        break;
+        case CAUSE_ILLEGAL_INSTRUCTION:
+            cprintf("Illegal instruction at %p\n", (void *)tf->epc);
+            // 低两位为 0b11 表示 32 位指令，否则为 16 位压缩指令
+            if ((*(uint16_t *)tf->epc & 0x3) != 0x3) {
+                tf->epc += 2;
+            } else {
+                tf->epc += 4;
+            }
+            break;
+
+        case CAUSE_BREAKPOINT:
+            cprintf("Breakpoint at %p\n", (void *)tf->epc);
+            if ((*(uint16_t *)tf->epc & 0x3) != 0x3) {
+                tf->epc += 2;
+            } else {
+                tf->epc += 4;
+            }
+            break;
+
+        default:
+            print_trapframe(tf);
+            break;
     }
 }
 ```
 
-关键点：
-
-- 异常发生时 `sepc` 指向引发异常的指令，处理完必须推进 `epc`，否则 `sret` 后会再次执行同一条指令，形成死循环。
-- 不能写死 `epc += 4`。RISC-V 支持 RVC 压缩指令（16 位，低两位不为 `11`）；本实验环境中 `ebreak` 会被汇编成 2 字节的 `c.ebreak`，而测试用的非法指令 `.word 0x0000007b` 是 4 字节。读取 `epc` 处半字的低两位判断 2/4 字节，可以同时覆盖 16/32 位两种断点场景。
-- `default` 分支不能 `panic`。评测会故意传入未知异常 `cause = 20`，要求先输出 trapframe（包含 `cause    0x00000014`）再正常返回，后续测试才能继续。这里只调用 `print_trapframe(tf)`，不推进 `epc`、不终止内核。
-- `print_trapframe()` 使用 `tval` 打印 `stval`；`cause` 行保持 `  cause    0x%08x` 的格式，和评测脚本的字符串匹配一致。
-- 输出字符串 `Breakpoint at` 和 `Illegal instruction at` 是评测脚本 `grep -F` 的匹配目标，不能随意改动。
+其中，非法指令异常和断点异常的输出格式是根据`grade.sh`的脚本代码确定的，输出指定文字后，根据`tf->epc`的低2位判断指令的长度是16位或32位，并正确更新`tf->epc`，避免重复陷入同一异常导致死循环。
 
 ---
 
