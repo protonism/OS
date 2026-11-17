@@ -242,6 +242,9 @@ void pmm_init(void) {
 pte_t *get_pte(pde_t *pgdir, uintptr_t la, bool create)
 {
     pde_t *pdep1 = &pgdir[PDX1(la)];
+    // 补上 get_pte() 的分配失败回滚 -lzs
+    pde_t saved_pdep1 = *pdep1;
+    struct Page *new_middle = NULL;
     if (!(*pdep1 & PTE_V))
     {
         struct Page *page;
@@ -249,23 +252,38 @@ pte_t *get_pte(pde_t *pgdir, uintptr_t la, bool create)
         {
             return NULL;
         }
+        // 补上 get_pte() 的分配失败回滚 -lzs
+        new_middle = page;
         set_page_ref(page, 1);
         uintptr_t pa = page2pa(page);
         memset(KADDR(pa), 0, PGSIZE);
-        *pdep1 = pte_create(page2ppn(page), PTE_U | PTE_V);
+        // 指向下级页表属于非叶项，U位为0 -lzs
+        *pdep1 = ptd_create(page2ppn(page));
+        // 全量刷新 -lzs
+        flush_tlb();
     }
     pde_t *pdep0 = &((pte_t *)KADDR(PDE_ADDR(*pdep1)))[PDX0(la)];
     if (!(*pdep0 & PTE_V))
     {
         struct Page *page;
-        if (!create || (page = alloc_page()) == NULL)
-        {
+        // 修改第二个分配分支中的失败处理 -lzs
+        if (!create || (page = alloc_page()) == NULL) {
+            if (new_middle != NULL) {
+                *pdep1 = saved_pdep1;
+                flush_tlb();
+
+                set_page_ref(new_middle, 0);
+                free_page(new_middle);
+            }
             return NULL;
         }
         set_page_ref(page, 1);
         uintptr_t pa = page2pa(page);
         memset(KADDR(pa), 0, PGSIZE);
-        *pdep0 = pte_create(page2ppn(page), PTE_U | PTE_V);
+        // 指向下级页表属于非叶项，U位为0 -lzs
+        *pdep0 = ptd_create(page2ppn(page));
+        // 全量刷新 -lzs
+        flush_tlb();
     }
     return &((pte_t *)KADDR(PDE_ADDR(*pdep0)))[PTX(la)];
 }
@@ -286,8 +304,65 @@ struct Page *get_page(pde_t *pgdir, uintptr_t la, pte_t **ptep_store)
 }
 
 //LAB4 function1 YOUR CODE
+// 删除映射的3个辅助函数 -lzs
+static void
+page_remove_pte(pde_t *pgdir, uintptr_t la, pte_t *ptep)
+{
+    /* 无有效映射时，不修改引用计数。 */
+    if (!(*ptep & PTE_V)) {
+        return;
+    }
 
+    struct Page *page = pte2page(*ptep);
 
+    /* 先撤销映射、刷新 TLB，再允许物理页被重新使用。 */
+    *ptep = 0;
+    tlb_invalidate(pgdir, la);
+
+    if (page_ref_dec(page) == 0) {
+        free_page(page);
+    }
+}
+
+// get_pte第三个参数为0表示只查找 -lzs
+void
+page_remove(pde_t *pgdir, uintptr_t la)
+{
+    pte_t *ptep = get_pte(pgdir, la, 0);
+
+    if (ptep != NULL) {
+        page_remove_pte(pgdir, la, ptep);
+    }
+}
+
+// 实现page_insert -lzs
+int
+page_insert(pde_t *pgdir, struct Page *page,
+            uintptr_t la, uint32_t perm)
+{
+    pte_t *ptep = get_pte(pgdir, la, 1);
+    if (ptep == NULL) {
+        return -E_NO_MEM;
+    }
+
+    page_ref_inc(page);
+
+    if (*ptep & PTE_V) {
+        struct Page *old_page = pte2page(*ptep);
+
+        if (old_page == page) {
+            /* 同页同地址重复映射，抵消刚才增加的引用。 */
+            page_ref_dec(page);
+        } else {
+            page_remove_pte(pgdir, la, ptep);
+        }
+    }
+
+    *ptep = pte_create(page2ppn(page), perm | PTE_V);
+    tlb_invalidate(pgdir, la);
+
+    return 0;
+}
 
 
 
@@ -299,7 +374,11 @@ void tlb_invalidate(pde_t *pgdir, uintptr_t la)
 {
     // flush_tlb();
     // The flush_tlb flush the entire TLB, is there any better way?
-    asm volatile("sfence.vma %0" : : "r"(la));
+    // 完善 TLB 刷新的编译器约束 -lzs
+    asm volatile("sfence.vma %0, zero"
+             :
+             : "r"(la)
+             : "memory");
 }
 
 static void check_alloc_page(void) {
@@ -336,9 +415,12 @@ static void check_pgdir(void)
     p2 = alloc_page();
     assert(page_insert(boot_pgdir_va, p2, PGSIZE, PTE_U | PTE_W) == 0);
     assert((ptep = get_pte(boot_pgdir_va, PGSIZE, 0)) != NULL);
+    // 修改断言 -lzs
     assert(*ptep & PTE_U);
     assert(*ptep & PTE_W);
-    assert(boot_pgdir_va[0] & PTE_U);
+    assert(boot_pgdir_va[0] & PTE_V);
+    assert((boot_pgdir_va[0] &
+        (PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D)) == 0);
     assert(page_ref(p2) == 1);
 
     assert(page_insert(boot_pgdir_va, p1, PGSIZE, 0) == 0);
