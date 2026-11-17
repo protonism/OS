@@ -42,8 +42,11 @@ struct trapframe {
     struct pushregs gpr;
     uintptr_t status;
     uintptr_t epc;
-    // uintptr_t badvaddr; -- thc: 修改成tval
-    uintptr_t tval;
+    /* Both names refer to stval without changing the assembly frame layout. */
+    union {
+        uintptr_t tval;
+        uintptr_t badvaddr;
+    };
     uintptr_t cause;
 };
 

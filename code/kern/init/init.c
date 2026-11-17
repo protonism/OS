@@ -9,6 +9,9 @@
 #include <string.h>
 #include <trap.h>
 #include <dtb.h>
+#include <picirq.h>
+#include <vmm.h>
+#include <proc.h>
 
 int kern_init(void) __attribute__((noreturn));
 void grade_backtrace(void);
@@ -26,18 +29,17 @@ int kern_init(void) {
     print_kerninfo();
 
     // grade_backtrace();
-    idt_init();  // init interrupt descriptor table
-
     pmm_init();  // init physical memory management
 
-    // can be deleted, the second idt_init is written here due to our ucore from x86
-    // idt_init();  // init interrupt descriptor table 
+    pic_init(); // init interrupt controller
+    idt_init(); // init interrupt descriptor table
+    vmm_init();  // init virtual memory management
+    proc_init(); // init process table
 
     clock_init();   // init clock interrupt
     intr_enable();  // enable irq interrupt
 
-    /* do nothing */
-    while (1) ;
+    cpu_idle(); // run idle process
 }
 
 void __attribute__((noinline))

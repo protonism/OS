@@ -4,6 +4,7 @@
 #include <best_fit_pmm.h>
 #include <stdio.h>
 
+//lab2 请补充你在lab2中的代码
 //lab2 function2-2: 从 lab2 迁移的 Best-Fit 分配器
 static free_area_t free_area;
 
@@ -138,6 +139,7 @@ best_fit_nr_free_pages(void) {
     return nr_free;
 }
 
+// Framework tests: students must not modify basic_check or best_fit_check.
 static void
 basic_check(void) {
     struct Page *p0, *p1, *p2;

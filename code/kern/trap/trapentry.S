@@ -7,6 +7,7 @@
     # 由于还没有实现用户态程序，这里sp不需要判断是否是用户态导致的trap
 
     addi sp, sp, -36 * REGBYTES 
+    # save gprs
     # save x registers
     STORE x0, 0*REGBYTES(sp)
     STORE x1, 1*REGBYTES(sp)
@@ -60,6 +61,7 @@
 
     .macro RESTORE_ALL
 
+    #lab3:填写你在lab3中实现的代码
     #lab3 function1 YOUR CODE -lzs负责
     # 这里可以直接使用sp，因为trap跳转回来的sp(callee)需要被调用者恢复到原来的值
     # 恢复CSR
@@ -112,6 +114,7 @@
 __alltraps:
     SAVE_ALL
 
+    #lab3:填写你在lab3中实现的代码
     #lab3 function1 YOUR CODE -lzs负责
     # sp should be the same as before "jal trap"
     # 把trapframe指针传入
@@ -121,5 +124,13 @@ __alltraps:
     .globl __trapret
 __trapret:
     RESTORE_ALL
+    # go back from supervisor call
     # return from supervisor call
     sret
+
+    # Lab4: restore a newly created thread through the existing trap return path.
+    .globl forkrets
+forkrets:
+    # set stack to this new process's trapframe
+    move sp, a0
+    j __trapret

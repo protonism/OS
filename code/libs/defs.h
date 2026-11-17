@@ -22,6 +22,14 @@ typedef unsigned int uint32_t;
 typedef long long int64_t;
 typedef unsigned long long uint64_t;
 
+#if __riscv_xlen == 64
+typedef uint64_t uint_t;
+typedef int64_t sint_t;
+#elif __riscv_xlen == 32
+typedef uint32_t uint_t;
+typedef int32_t sint_t;
+#endif
+
 /* Add fast types */
 typedef signed char int_fast8_t;
 typedef short int_fast16_t;
@@ -33,13 +41,15 @@ typedef unsigned short uint_fast16_t;
 typedef unsigned long uint_fast32_t;
 typedef unsigned long long uint_fast64_t;
 
+// Original skeleton wording is retained below. In this merged project,
+// __riscv_xlen selects the actual widths through sint_t and uint_t.
 /* *
- * Pointers and addresses are 64 bits long.
+ * Pointers and addresses are 32 bits long.
  * We use pointer types to represent addresses,
  * uintptr_t to represent the numerical values of addresses.
  * */
-typedef int64_t intptr_t;
-typedef uint64_t uintptr_t;
+typedef sint_t intptr_t;
+typedef uint_t uintptr_t;
 
 /* size_t is used for memory object sizes */
 typedef uintptr_t size_t;

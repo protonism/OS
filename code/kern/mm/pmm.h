@@ -8,31 +8,29 @@
 #include <mmu.h>
 #include <riscv.h>
 
-// pmm_manager is a physical memory management class. A special pmm manager -
-// XXX_pmm_manager
-// only needs to implement the methods in pmm_manager class, then
-// XXX_pmm_manager can be used
+/* fork flags used in do_fork*/
+#define CLONE_VM 0x00000100     // set if VM shared between processes
+#define CLONE_THREAD 0x00000200 // thread group
+
+// pmm_manager is a physical memory management class. A special pmm manager - XXX_pmm_manager
+// only needs to implement the methods in pmm_manager class, then XXX_pmm_manager can be used
 // by ucore to manage the total physical memory space.
-struct pmm_manager {
-    const char *name;  // XXX_pmm_manager's name
-    void (*init)(
-        void);  // initialize internal description&management data structure
-                // (free block list, number of free block) of XXX_pmm_manager
-    void (*init_memmap)(
-        struct Page *base,
-        size_t n);  // setup description&management data structcure according to
-                    // the initial free physical memory space
-    struct Page *(*alloc_pages)(
-        size_t n);  // allocate >=n pages, depend on the allocation algorithm
-    void (*free_pages)(struct Page *base, size_t n);  // free >=n pages with
-                                                      // "base" addr of Page
-                                                      // descriptor
-                                                      // structures(memlayout.h)
-    size_t (*nr_free_pages)(void);  // return the number of free pages
-    void (*check)(void);            // check the correctness of XXX_pmm_manager
+struct pmm_manager
+{
+    const char *name;                                 // XXX_pmm_manager's name
+    void (*init)(void);                               // initialize internal description&management data structure
+                                                      // (free block list, number of free block) of XXX_pmm_manager
+    void (*init_memmap)(struct Page *base, size_t n); // setup description&management data structcure according to
+                                                      // the initial free physical memory space
+    struct Page *(*alloc_pages)(size_t n);            // allocate >=n pages, depend on the allocation algorithm
+    void (*free_pages)(struct Page *base, size_t n);  // free >=n pages with "base" addr of Page descriptor structures(memlayout.h)
+    size_t (*nr_free_pages)(void);                    // return the number of free pages
+    void (*check)(void);                              // check the correctness of XXX_pmm_manager
 };
 
 extern const struct pmm_manager *pmm_manager;
+extern pde_t *boot_pgdir_va;
+extern uintptr_t boot_pgdir_pa;
 
 void pmm_init(void);
 
@@ -43,14 +41,18 @@ size_t nr_free_pages(void); // number of free pages
 #define alloc_page() alloc_pages(1)
 #define free_page(page) free_pages(page, 1)
 
+pte_t *get_pte(pde_t *pgdir, uintptr_t la, bool create);
+struct Page *get_page(pde_t *pgdir, uintptr_t la, pte_t **ptep_store);
+void page_remove(pde_t *pgdir, uintptr_t la);
+int page_insert(pde_t *pgdir, struct Page *page, uintptr_t la, uint32_t perm);
+void tlb_invalidate(pde_t *pgdir, uintptr_t la);
+struct Page *pgdir_alloc_page(pde_t *pgdir, uintptr_t la, uint32_t perm);
+void print_pgdir(void);
 
 /* *
- * PADDR - takes a kernel virtual address (an address that points above
- * KERNBASE),
- * where the machine's maximum 256MB of physical memory is mapped and returns
- * the
- * corresponding physical address.  It panics if you pass it a non-kernel
- * virtual address.
+ * PADDR - takes a kernel virtual address (an address that points above KERNBASE),
+ * where the machine's maximum 256MB of physical memory is mapped and returns the
+ * corresponding physical address.  It panics if you pass it a non-kernel virtual address.
  * */
 #define PADDR(kva)                                                 \
     ({                                                             \
@@ -65,7 +67,6 @@ size_t nr_free_pages(void); // number of free pages
  * KADDR - takes a physical address and returns the corresponding kernel virtual
  * address. It panics if you pass an invalid physical address.
  * */
-/*
 #define KADDR(pa)                                                \
     ({                                                           \
         uintptr_t __m_pa = (pa);                                 \
@@ -75,11 +76,10 @@ size_t nr_free_pages(void); // number of free pages
         }                                                        \
         (void *)(__m_pa + va_pa_offset);                         \
     })
-*/
 extern struct Page *pages;
 extern size_t npage;
 extern const size_t nbase;
-extern uint64_t va_pa_offset;
+extern uint_t va_pa_offset;
 
 static inline ppn_t page2ppn(struct Page *page) { return page - pages + nbase; }
 
@@ -108,7 +108,37 @@ static inline struct Page *pa2page(uintptr_t pa) {
     }
     return &pages[PPN(pa) - nbase];
 }
-static inline void flush_tlb() { asm volatile("sfence.vm"); }
+static inline void *page2kva(struct Page *page) {
+    return KADDR(page2pa(page));
+}
+
+static inline struct Page *kva2page(void *kva) {
+    return pa2page(PADDR(kva));
+}
+
+static inline struct Page *pte2page(pte_t pte) {
+    if (!(pte & PTE_V)) {
+        panic("pte2page called with invalid pte");
+    }
+    return pa2page(PTE_ADDR(pte));
+}
+
+static inline struct Page *pde2page(pde_t pde) {
+    return pa2page(PDE_ADDR(pde));
+}
+
+static inline void flush_tlb(void) {
+    asm volatile("sfence.vma" ::: "memory");
+}
+
+// construct PTE from a page and permission bits
+static inline pte_t pte_create(uintptr_t ppn, int type) {
+    return (ppn << PTE_PPN_SHIFT) | PTE_V | type;
+}
+
+static inline pte_t ptd_create(uintptr_t ppn) {
+    return pte_create(ppn, PTE_V);
+}
 extern char bootstack[], bootstacktop[]; // defined in entry.S
 
 #endif /* !__KERN_MM_PMM_H__ */

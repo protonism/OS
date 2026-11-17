@@ -3,14 +3,36 @@
 
 #ifndef __ASSEMBLER__
 #include <defs.h>
-#endif
+#endif /* !__ASSEMBLER__ */
 
 
 #define PGSIZE          4096                    // bytes mapped by a page
 #define PGSHIFT         12                      // log2(PGSIZE)
 
+// page number field of address
 // physical/virtual page number of address
 #define PPN(la) (((uintptr_t)(la)) >> PGSHIFT)
+
+// Original Lab4 skeleton notes (Sv32), retained verbatim for reference.
+// The existing Sv39 description and macros follow below.
+// A linear address 'la' has a three-part structure as follows:
+//
+// +--------10------+-------10-------+---------12----------+
+// | Page Directory |   Page Table   | Offset within Page  |
+// |      Index     |     Index      |                     |
+// +----------------+----------------+---------------------+
+//  \--- PDX(la) --/ \--- PTX(la) --/ \---- PGOFF(la) ----/
+//  \----------- PPN(la) -----------/
+//
+// The PDX, PTX, PGOFF, and PPN macros decompose linear addresses as shown.
+// To construct a linear address la from PDX(la), PTX(la), and PGOFF(la),
+// use PGADDR(PDX(la), PTX(la), PGOFF(la)).
+
+// RISC-V uses 32-bit virtual address to access 34-bit physical address!
+// Sv32 page table entry:
+// +---------12----------+--------10-------+---2----+-------8-------+
+// |       PPN[1]        |      PPN[0]     |Reserved|D|A|G|U|X|W|R|V|
+// +---------12----------+-----------------+--------+---------------+
 
 // Sv39 linear address structure
 // +-------9--------+-------9--------+--------9---------+----------12----------+
@@ -28,7 +50,7 @@
 
 #define SV39_PGSIZE          4096                    // bytes mapped by a page
 #define SV39_PGSHIFT         12                      // log2(PGSIZE)
-#define SV39_PTSIZE          (PGSIZE * SV39NENTRY)   // bytes mapped by a page directory entry
+#define SV39_PTSIZE          (PGSIZE * SV39_NENTRY)   // bytes mapped by a page directory entry
 #define SV39_PTSHIFT         21                      // log2(PTSIZE)
 
 #define SV39_VPN0SHIFT       12                      // offset of VPN0 in a linear address
@@ -45,7 +67,27 @@
 #define SV39_PGADDR(v2, v1, v0, o) ((uintptr_t)((v2) << SV39_VPN2SHIFT | (v1) << SV39_VPN1SHIFT | (v0) << SV39_VPN0SHIFT | (o)))
 
 // address in page table or page directory entry
-#define SV39_PTE_ADDR(pte)   (((uintptr_t)(pte) & ~0x1FF) << 3)
+#define SV39_PTE_ADDR(pte)   (((uintptr_t)(pte) & ~0x3FF) << (PGSHIFT - SV39_PTE_PPN_SHIFT))
+
+// Lab4 page-table interfaces use these names for the same Sv39 layout.
+#define NPDEENTRY           SV39_NENTRY    // page directory entries per page directory
+#define NPTEENTRY           SV39_NENTRY    // page table entries per page table
+#define PTSIZE              SV39_PTSIZE    // bytes mapped by a page directory entry
+#define PTSHIFT             SV39_PTSHIFT    // log2(PTSIZE)
+#define PTXSHIFT            SV39_VPN0SHIFT    // offset of PTX in a linear address
+#define PDX0SHIFT           SV39_VPN1SHIFT    // offset of PDX in a linear address
+#define PDX1SHIFT           SV39_VPN2SHIFT
+#define PTE_PPN_SHIFT       10    // offset of PPN in a physical address
+// page directory index
+#define PDX1(la)            SV39_VPN2(la)
+#define PDX0(la)            SV39_VPN1(la)
+// page table index
+#define PTX(la)             SV39_VPN0(la)
+// offset in page
+#define PGOFF(la)           (((uintptr_t)(la)) & (PGSIZE - 1))
+#define PGADDR(d1, d0, t, o) SV39_PGADDR(d1, d0, t, o)
+#define PTE_ADDR(pte)        SV39_PTE_ADDR(pte)
+#define PDE_ADDR(pde)        PTE_ADDR(pde)
 
 // 3-level pagetable
 #define SV39_PT0                 0

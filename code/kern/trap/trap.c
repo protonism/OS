@@ -9,9 +9,9 @@
 #include <stdio.h>
 #include <trap.h>
 #include <sbi.h>
+#include <vmm.h>
 
 #define TICK_NUM 100
-#define SHUTDOWN_AFTER 500 // 5s后关机
 
 static void print_ticks() {
     cprintf("%d ticks\n", TICK_NUM);
@@ -21,14 +21,17 @@ static void print_ticks() {
 #endif
 }
 
-/* idt_init - initialize IDT to each of the entry points in kern/trap/vectors.S */
+/* idt_init - initialize IDT to each of the entry points in kern/trap/vectors.S
+ */
 void idt_init(void) {
     extern void __alltraps(void);
-    /* Set sup0 scratch register to 0, indicating to exception vector
-       that we are presently executing in the kernel */
+    /* Set sscratch register to 0, indicating to exception vector that we are
+     * presently executing in the kernel */
     write_csr(sscratch, 0);
     /* Set the exception vector address */
     write_csr(stvec, &__alltraps);
+    /* Allow kernel to access user memory */
+    set_csr(sstatus, SSTATUS_SUM);
 }
 
 /* trap_in_kernel - test if trap happened in kernel */
@@ -81,6 +84,7 @@ void print_regs(struct pushregs *gpr) {
     cprintf("  t6       0x%08x\n", gpr->t6);
 }
 
+//lab3 请补充你在lab3中的代码
 //lab3 function2 YOUR CODE
 //-2413073 thc 负责 interrupt_handler
 void interrupt_handler(struct trapframe *tf){
@@ -94,7 +98,10 @@ void interrupt_handler(struct trapframe *tf){
 
             ticks++;
             if (ticks % TICK_NUM == 0) print_ticks();
-            if (ticks >= SHUTDOWN_AFTER) sbi_shutdown();
+            /* Optional Lab3 demo shutdown; disabled for normal Lab4 runs. */
+#ifdef LAB3_SHUTDOWN_AFTER
+            if (ticks >= LAB3_SHUTDOWN_AFTER) sbi_shutdown();
+#endif
 
             break;
             // lab3实验只完成时钟相关中断，其它中断后续实验完成

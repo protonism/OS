@@ -42,6 +42,7 @@ kern_entry:
     # 2. 将精确地址一次性地、安全地传给 sp
     mv sp, t1
     # 现在栈指针已经完美设置，可以安全地调用任何C函数了
+    # 跳转到 kern_init
     # 然后跳转到 kern_init (不再返回)
     lui t0, %hi(kern_init)
     addi t0, t0, %lo(kern_init)
@@ -56,11 +57,15 @@ bootstack:
     .global bootstacktop
 bootstacktop:
 
+    # 由于我们要把这个页表放到一个页里面，因此必须 12 位对齐
     # a page table for Sv39
     .align PGSHIFT
     .global boot_page_table_sv39
 # 分配 4KiB 内存给预设的三级页表
 boot_page_table_sv39:
+    # 原 Lab4 骨架仅设置高地址映射，其说明原文保留如下：
+    # 前 511 个页表项均设置为 0 ，因此 V=0 ，意味着是空的(unmapped)
+    # 当前实现保留 Lab3 的索引 2 恒等映射，实际页表布局见下方。
     # 恒等映射 0x80000000-0xbfffffff -> 0x80000000 (1G)
     # 写入 satp 后，CPU 会立即按 Sv39 取指，而此时 PC 仍是物理地址
     # 0x802000xx。该地址作为虚拟地址时 VPN2 = 2，因此叶子项放在索引 2。
