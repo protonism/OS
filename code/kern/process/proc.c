@@ -384,7 +384,7 @@ void proc_init(void){
     current = idleproc;
 
     // 创建 initproc，但不立即执行它
-    int pid = kernel_thread(init_main, "Hello, World!", 0);
+    int pid = kernel_thread(init_main, "Hello world!!", 0);
 
     if (pid <= 0) panic("create init_main failed.\n");
 
@@ -396,4 +396,43 @@ void proc_init(void){
     assert(initproc->pid == 1);
 }
 
-//LAB4 YOUR CODE PART 3
+//LAB4 2413523 PART 3
+
+// proc_run - 把 CPU 从当前进程切换到 proc 进程上运行
+//   1. 更新 current 指针
+//   2. 切换页表（写 satp）
+//   3. 调用 switch_to 保存旧上下文、恢复新上下文
+// 整个过程在关中断的状态下完成
+void proc_run(struct proc_struct *proc){
+    if (proc == current) return;
+
+    bool intr_flag;
+    struct proc_struct *prev = current, *next = proc;
+
+    local_intr_save(intr_flag);
+    {
+        current = proc;
+
+        // 切换页表。next->pgdir 中保存的是页目录的物理地址。
+        // 注意：这里不能使用 riscv.h 中的 lsatp()，它是 Sv32 的遗留写法，
+        // 无法表达 Sv39 的 satp；因此参照 pmm.c 中 enable_paging() 的做法，
+        // 用 SATP_MODE_SV39（8）构造 satp 的 MODE 字段（位于最高位）。
+        write_csr(satp, ((uint64_t)SATP_MODE_SV39 << 60) |
+                        (next->pgdir >> RISCV_PGSHIFT));
+        flush_tlb(); // 写 satp 不会自动刷新 TLB，需显式 sfence.vma
+
+        switch_to(&(prev->context), &(next->context));
+    }
+    local_intr_restore(intr_flag);
+}
+
+// cpu_idle - idle 线程的执行主体
+// 循环检查当前进程是否被要求重新调度，若有则调用 schedule() 切换出去；
+// 没有可运行进程时 schedule() 会选回 idleproc，从而回到这里继续等待。
+void cpu_idle(void){
+    while (1) {
+        if (current->need_resched) {
+            schedule();
+        }
+    }
+}

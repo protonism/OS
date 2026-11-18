@@ -432,23 +432,192 @@ assert(page_ref(p2) == 1);
 
 ### 4.3 功能模块三：进程调度与上下文切换
 
-**负责人：**
+**负责人：** 2413523-尤祺乐
 
-**Spec：**
+**Spec：** 需要实现以下函数：
+
+```c
+void cpu_idle(void);(kern/process/proc.c)
+void schedule(void);(kern/schedule/sched.c)
+void proc_run(struct proc_struct *proc);(kern/process/proc.c)
+void switch_to(struct context *from, struct context *to);(kern/process/switch.S)
+```
+
+其中，`cpu_idle()`函数需要持续等待，当需要重新调度时，调用`schedule()`函数进行进程调度；`schedule()`函数需要从进程链表`proc_list`中按一定策略寻找下一个可运行的线程，并调用`proc_run()`函数以运行该线程；`proc_run()`函数需要切换当前线程与页表，并调用`switch_to()`函数切换上下文；`switch_to()`函数需要保存旧线程的相关寄存器，并加载新线程的相关寄存器。
 
 **Prompt：**
 
+| 函数 | prompt |
+| --- | --- |
+| `switch_to()` | 请你实现位于kern/process/proc.c声明的void switch_to(struct context *from, struct context *to);函数，这个函数应该定义在kern/process/switch.S，作用是保存from的上下文，包括ra、sp、s0-s11等必要的寄存器，然后恢复to的上下文。为了支持不同位数，请考虑使用libs/riscv.h中定义的LOAD STORE REGBYTES等宏编写 |
+| `proc_run()` | 请你在kern/process/proc.c的末尾实现void proc_run(struct proc_struct *proc);函数，这个函数的作用是将进程从current切换到proc，需要更新current，切换页表并调用switch_to()函数更新上下文，并使用local_intr_save()与local_intr_restore()宏在关键区域打断中断，注意libs/riscv.h中的lsatp()是Sv32遗留，无法表达Sv39的satp，请参考kern/mm/pmm.c中的enable_paging()的写法，可以使用SATP_MODE_SV39宏 |
+| `schedule()` | 请你在kern/schedule/sched.c的末尾实现函数void schedule(void);该函数应该首先令current->need_resched为0，然后在proc_list链表中查找下一个处于PROC_RUNNABLE状态的线程或进程，查找策略如下：“1、当前是idleproc，从链表头开始查找；2、当前不是idleproc，从当前进程的下一个位置开始查找”。如果找到了这样的进程，调用proc_run()以切换到对应进程，如果没有这样的进程则回到idleproc进程。需要用local_intr_save()与local_intr_restore()宏在关键区域打断中断 |
+| `cpu_idle()` | 请你在kern/process/proc.c实现void cpu_idle(void);函数，该函数作为空闲线程的执行主体应该持续等待调度需求，当need_resched == 1时，调用schedule()函数进行调度 |
+
 **实现：**
 
-**说明与真实问题：**
+**`switch_to()`：**
+
+```asm
+//LAB4 function3 2413523
+
+#include <riscv.h>
+
+/*
+ * void switch_to(struct context *from, struct context *to);
+ *
+ * a0 = from, a1 = to
+ *
+ * struct context 的布局（见 proc.h）：
+ *   ra, sp, s0, s1, ..., s11   （共 14 个字段）
+ *
+ * 使用 riscv.h 中的 STORE/LOAD/REGBYTES 宏，
+ * 因此同一份代码同时适用于 RV32 和 RV64。
+ *
+ * switch_to 不通过普通函数调用返回：它保存当前线程的 callee-saved
+ * 寄存器到 from，再从 to 恢复这些寄存器，最后 ret 跳到 to->ra。
+ * 一个新线程首次被调度时，to->ra 指向 forkret，to->sp 指向它的 trapframe。
+ */
+    .text
+    .globl switch_to
+    .align 2
+switch_to:
+    # ---- 保存 from 的上下文 ----
+    STORE ra,  0*REGBYTES(a0)
+    STORE sp,  1*REGBYTES(a0)
+    STORE s0,  2*REGBYTES(a0)
+    STORE s1,  3*REGBYTES(a0)
+    STORE s2,  4*REGBYTES(a0)
+    STORE s3,  5*REGBYTES(a0)
+    STORE s4,  6*REGBYTES(a0)
+    STORE s5,  7*REGBYTES(a0)
+    STORE s6,  8*REGBYTES(a0)
+    STORE s7,  9*REGBYTES(a0)
+    STORE s8, 10*REGBYTES(a0)
+    STORE s9, 11*REGBYTES(a0)
+    STORE s10, 12*REGBYTES(a0)
+    STORE s11, 13*REGBYTES(a0)
+
+    # ---- 恢复 to 的上下文 ----
+    LOAD ra,  0*REGBYTES(a1)
+    LOAD sp,  1*REGBYTES(a1)
+    LOAD s0,  2*REGBYTES(a1)
+    LOAD s1,  3*REGBYTES(a1)
+    LOAD s2,  4*REGBYTES(a1)
+    LOAD s3,  5*REGBYTES(a1)
+    LOAD s4,  6*REGBYTES(a1)
+    LOAD s5,  7*REGBYTES(a1)
+    LOAD s6,  8*REGBYTES(a1)
+    LOAD s7,  9*REGBYTES(a1)
+    LOAD s8, 10*REGBYTES(a1)
+    LOAD s9, 11*REGBYTES(a1)
+    LOAD s10, 12*REGBYTES(a1)
+    LOAD s11, 13*REGBYTES(a1)
+
+    # 转到 to 上次切出时的返回地址（新线程为 forkret）
+    ret
+```
+
+**`proc_run()`：**
+
+```c
+// proc_run - 把 CPU 从当前进程切换到 proc 进程上运行
+//   1. 更新 current 指针
+//   2. 切换页表（写 satp）
+//   3. 调用 switch_to 保存旧上下文、恢复新上下文
+// 整个过程在关中断的状态下完成
+void proc_run(struct proc_struct *proc){
+    if (proc == current) return;
+
+    bool intr_flag;
+    struct proc_struct *prev = current, *next = proc;
+
+    local_intr_save(intr_flag);
+    {
+        current = proc;
+
+        // 切换页表。next->pgdir 中保存的是页目录的物理地址。
+        // 注意：这里不能使用 riscv.h 中的 lsatp()，它是 Sv32 的遗留写法，
+        // 无法表达 Sv39 的 satp；因此参照 pmm.c 中 enable_paging() 的做法，
+        // 用 SATP_MODE_SV39（8）构造 satp 的 MODE 字段（位于最高位）。
+        write_csr(satp, ((uint64_t)SATP_MODE_SV39 << 60) |
+                        (next->pgdir >> RISCV_PGSHIFT));
+        flush_tlb(); // 写 satp 不会自动刷新 TLB，需显式 sfence.vma
+
+        switch_to(&(prev->context), &(next->context));
+    }
+    local_intr_restore(intr_flag);
+}
+```
+
+**`schedule()`：**
+
+```c
+// schedule - 从 proc_list 中挑选一个 PROC_RUNNABLE 的进程投入运行
+//   1. 当前是 idleproc：从链表头开始查找
+//   2. 当前不是 idleproc：从当前进程的下一个位置开始查找（可回绕）
+//   找不到可运行进程时，回到 idleproc
+void schedule(void){
+    bool intr_flag;
+    list_entry_t *le, *last;
+    struct proc_struct *next = NULL;
+
+    local_intr_save(intr_flag);
+    {
+        current->need_resched = 0;
+
+        // 查找起点：idleproc 从链表头开始；否则从当前进程的下一个位置开始
+        last = (current == idleproc) ? &proc_list : &(current->list_link);
+        le = last;
+        do {
+            if ((le = list_next(le)) != &proc_list) {
+                next = le2proc(le, list_link);
+                if (next->state == PROC_RUNNABLE) {
+                    break;
+                }
+            }
+        } while (le != last);
+
+        // 没有找到可运行进程，则回到 idleproc
+        if (next == NULL || next->state != PROC_RUNNABLE) {
+            next = idleproc;
+        }
+
+        next->runs++;
+        if (next != current) {
+            proc_run(next);
+        }
+    }
+    local_intr_restore(intr_flag);
+}
+```
+
+**`cpu_idle()`:**
+
+```c
+// cpu_idle - idle 线程的执行主体
+// 循环检查当前进程是否被要求重新调度，若有则调用 schedule() 切换出去；
+// 没有可运行进程时 schedule() 会选回 idleproc，从而回到这里继续等待。
+void cpu_idle(void){
+    while (1) {
+        if (current->need_resched) {
+            schedule();
+        }
+    }
+}
+```
 
 ---
 
 ### 4.4 Challenge 1：中断保存与恢复
 
-**负责人：**
+**负责人：** 2413523-尤祺乐
 
-**分析：**
+**分析：** `local_intr_save(x)`宏可以视作`x = __intr_save();`，外层的循环只是一种常见的宏编写技巧，使得宏可以被视作一个语句块。宏的作用就是调用`__intr_save()`函数，该函数检查`sstatus`的`SIE`位。如果`SIE`位为1，说明中断打开，则调用`intr_disable()`清除`SIE`位，并返回1；反之，则中断已经关闭，返回0。函数的返回值会赋给宏的参数，作为调用宏之前中断的开关标记。总而言之，`local_intr_save(x)`宏的作用是通过修改`SIE`位以确保中断是关闭的，并返回调用宏前中断的开关情况，调用者需要记录这一标记并维护。
+
+`local_intr_restore(x)`宏可以视作`__intr_restore(x);`。宏的作用就是调用`__intr_restore()`函数，该函数接受此前由调用者维护的标记作为参数，如果标记为0，说明在尝试关闭中断之前中断已经关闭，无需恢复，直接返回；反之，则说明尝试关闭中断之前中断是打开状态，则调用`intr_enable()`函数，通过写入`SIE`位打开中断以恢复中断原有的状态。总而言之，`local_intr_restore(x)`宏的作用是将中断开关情况恢复到调用`local_intr_save(x)`宏之前。
+
+一段代码块需要临时关闭中断时，只需声明一个`bool`变量作为标记，并在代码块前调用`local_intr_save(x)`宏，代码块后调用`local_intr_restore(x)`宏即可。
 
 ---
 
@@ -539,6 +708,22 @@ Sv39 和 Sv48 的地址由 64 位寄存器承载，高位分别需要符合第 3
 
 ### 5.6 官方评分与完整回归
 
+执行`make grade`的结果如下：
+
+```bash
+make grade
+lab4 injection complete
+kern/test/test_lab4.c: In function 'test_lab4_thread':
+kern/test/test_lab4.c:84:1: warning: no return statement in function returning non-void [-Wreturn-type]
+   84 | }
+      | ^
+gmake[1]: Entering directory '/tmp/lab4_grade' + cc kern/init/entry.S + cc kern/init/init.c + cc kern/libs/readline.c + cc kern/libs/stdio.c + cc kern/debug/kdebug.c + cc kern/debug/kmonitor.c + cc kern/debug/panic.c + cc kern/driver/clock.c + cc kern/driver/console.c + cc kern/driver/dtb.c + cc kern/driver/intr.c + cc kern/driver/picirq.c + cc kern/trap/trap.c + cc kern/trap/trapentry.S + cc kern/mm/best_fit_pmm.c + cc kern/mm/default_pmm.c + cc kern/mm/kmalloc.c + cc kern/mm/pmm.c + cc kern/mm/vmm.c + cc kern/process/entry.S + cc kern/process/proc.c + cc kern/process/switch.S + cc kern/schedule/sched.c + cc kern/test/test_lab4.c + cc libs/hash.c + cc libs/printfmt.c + cc libs/string.c + ld bin/kernel riscv64-unknown-elf-objcopy bin/kernel --strip-all -O binary bin/ucore.img gmake[1]: Leaving directory '/tmp/lab4_grade'
+  -check PMM:                                OK
+  -check Process Create:                     OK
+  -check Schedule:                           OK
+Total Score: 30/30
+```
+
 ### 5.7 日志与截图
 
 ---
@@ -551,7 +736,7 @@ Sv39 和 Sv48 的地址由 64 位寄存器承载，高位分别需要符合第 3
 
 **唐涵城：**
 
-**尤祺乐：**
+**尤祺乐：** 本部分完成了进程调度的功能，对调度器的设计有了一个初步的结论。
 
 ### 6.2 主要问题与解决
 
