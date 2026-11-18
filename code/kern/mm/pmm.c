@@ -85,7 +85,7 @@ size_t nr_free_pages(void) {
     return ret;
 }
 
-//lab2 请补充你在lab2中的代码
+//lab2 请补充你在lab2中的代码 - thc
 //lab2 function1: 从 lab2 迁移的物理内存初始化
 static void page_init(void) {
     extern char end[];  // tools/kernel.ld 在 .bss 末尾提供

@@ -123,10 +123,10 @@ __alltraps:
 
     .globl __trapret
 __trapret:
-    RESTORE_ALL
+    RESTORE_ALL # 从栈里面把所有
     # go back from supervisor call
     # return from supervisor call
-    sret
+    sret    # 从spec指定的位置继续执行
 
     # Lab4: restore a newly created thread through the existing trap return path.
     .globl forkrets
