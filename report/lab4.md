@@ -13,8 +13,8 @@
 | 成员 | 负责的模块 |
 |------|----------------|
 | 2413576-林泽森 | 模块一：`page_insert()`、`page_remove()` 及其辅助函数；Lab2 内存初始化与 Best-Fit 依赖的迁移和接口核对；必要的启动适配；Challenge 2 第一问；报告中的环境、整体逻辑和本模块内容 |
-| 2413073-唐涵城 | |
-| 2413523-尤祺乐 | |
+| 2413073-唐涵城 | 负责模块二（进程创建及初始化），实现 PCB 初始化、内核线程创建和初始执行现场构造，以及 `idleproc`、`initproc` 的初始化。撰写报告第 4.2 节并解答 Challenge 2 第二问。 |
+| 2413523-尤祺乐 | 负责模块三（进程调度与上下文切换），实现 `cpu_idle()`、`schedule()`、`proc_run()` 和 `switch_to()`。撰写报告第 4.3 节并解答 Challenge 1。 |
 
 ---
 
@@ -418,15 +418,41 @@ assert(page_ref(p2) == 1);
 
 ### 4.2 功能模块二：进程创建及初始化
 
-**负责人：**
+**负责人：** 2413073-唐涵城。
 
-**Spec：**
+**Spec**
 
-**Prompt：**
+在 RISC-V 内核中实现 `alloc_proc()`、`copy_thread()`、`copy_mm()`、`do_fork()`、`kernel_thread()` 和 `proc_init()`。为新内核线程准备独立的 PCB、内核栈和初始寄存器现场，共用启动页表。资源准备完成后分配 PID、登记线程并置为可运行。启动时用 `idleproc` 表示已有的执行流，再创建等待调度的 `initproc`。 [proc.c](../code/kern/process/proc.c)
 
-**实现：**
+**Prompt（根据实现整理）**
 
-**说明与真实问题：**
+> 请结合现有的进程链表、PID 散列表和 RISC-V 陷阱返回代码，实现内核线程创建和进程管理初始化。说明新线程的栈、`context` 和 `trapframe` 如何设置，首次调度后如何进入指定函数，以及创建失败时如何回收已经申请的资源。
+
+**实现**
+
+1. **初始化 PCB 和启动线程。** `alloc_proc()` 用 `kmalloc()` 分配 PCB 并整体清零，设置 `state = PROC_UNINIT`、`pid = -1`、`pgdir = boot_pgdir_pa`，再初始化进程链表和散列表所用的两个节点。内核线程的 `mm` 初始为 `NULL`。 `proc_init()` 初始化全局进程链表和各散列桶，将正在运行的启动执行流设为 `current = idleproc`。其 PID 为 0，沿用 `bootstack`，状态为 `PROC_RUNNABLE`，并通过 `need_resched = 1` 请求首次调度。随后调用 `kernel_thread(init_main, "Hello world!!", 0)`，根据返回的 PID 找到 `initproc`，命名为 `init` 并断言其 PID 为 1。
+2. **准备并登记新线程。** `do_fork()` 先检查进程数量上限，再分配 PCB、记录父进程 `current`，并通过 `setup_kstack()` 申请 `KSTACKPAGE` 个连续页作为内核栈。本实验中 `KSTACKPAGE = 2`，每个新线程的栈为 8 KiB。 `copy_mm()` 断言父线程的 `mm == NULL`，子线程沿用 PCB 中初始化的 `mm` 和 `pgdir`。完成 `copy_thread()` 后，临时关闭本地中断，依次分配 PID、加入 `proc_list` 和 PID 散列表、递增 `nr_process`。恢复原中断状态后调用 `wakeup_proc()`，将线程由 `PROC_UNINIT` 置为 `PROC_RUNNABLE`，并向调用者返回新线程的 PID。 [proc.c](../code/kern/process/proc.c) · [memlayout.h](../code/kern/mm/memlayout.h) · [sched.c](../code/kern/schedule/sched.c)
+3. **构造首次执行现场。** `kernel_thread()` 将入口函数 `fn` 和参数 `arg` 分别写入临时陷阱帧的 `s0`、`s1`，将 `epc` 指向 `kernel_thread_entry`，再以 `clone_flags | CLONE_VM` 和栈参数 0 调用 `do_fork()`。初始 `sstatus` 设置 `SPP`、`SPIE` 并清除 `SIE`，使恢复现场期间保持关中断，执行 `sret` 后进入 S 态并开启 S 态全局中断。 [RISC-V 特权架构规范](https://github.com/riscv/riscv-isa-manual/blob/main/src/priv/supervisor.adoc#supervisor-status-sstatus-register)
+
+`copy_thread()` 将临时陷阱帧复制到新线程自己的内核栈，并构造供 `switch_to()` 恢复的调度上下文。关键代码如下。
+
+```c
+proc->tf = (struct trapframe *)
+    (proc->kstack + KSTACKSIZE - sizeof(struct trapframe));
+*(proc->tf) = *tf;
+proc->tf->gpr.a0 = 0;
+proc->tf->gpr.sp = (esp == 0) ? (uintptr_t)proc->tf : esp;
+proc->context.ra = (uintptr_t)forkret;
+proc->context.sp = (uintptr_t)proc->tf;
+```
+
+`context.ra`、`context.sp` 决定第一次切换时的返回地址和栈指针。 `switch_to()` 恢复上下文后通过 `ret` 进入 `forkret()`，后者将 `current->tf` 交给 `forkrets`，复用 `__trapret` 恢复通用寄存器、`sstatus` 和 `sepc`。随后 `sret` 跳到 `kernel_thread_entry`。陷阱帧中的 `a0 = 0` 对应子进程的 fork 返回值约定，内核线程的汇编入口会将 `s1` 搬到 `a0`，再用 `jalr s0` 调用 `fn(arg)`。 [trapentry.S](../code/kern/trap/trapentry.S) · [entry.S](../code/kern/process/entry.S)
+
+**说明与真实问题**
+
+- `kernel_thread()` 的临时陷阱帧位于创建者的栈上，函数返回后该空间可以被覆盖。 `copy_thread()` 在登记线程之前将其完整复制到子线程自己的栈，使首次恢复使用的陷阱帧在随后调度时仍然有效。
+- 达到进程数量上限时，`do_fork()` 返回 `-E_NO_FREE_PROC`。PCB 分配失败直接返回 `-E_NO_MEM`，内核栈分配失败则先释放 PCB。 `copy_mm()` 返回错误时，清理路径先释放内核栈，再释放 PCB。这些失败路径均在分配 PID 和登记进程之前。
+- 在 QEMU 中运行注入测试，串口输出 `[Test Process Create] PASS` 和 `[Test Schedule] PASS`，并打印了 `initproc` 的 PID、名称和传入参数。测试断言覆盖了启动线程、父子关系和新线程的初始上下文。 `init_main()` 返回后，汇编入口调用当前框架的 `do_exit()`，随后触发 panic。 [test_lab4.c](../code/tools/test_lab4.c) · [proc.c](../code/kern/process/proc.c)
 
 ---
 
@@ -674,14 +700,19 @@ Sv39 和 Sv48 的地址由 64 位寄存器承载，高位分别需要符合第 3
 
 ### 4.6 Challenge 2 第二问：查找与分配是否拆分
 
-**负责人：**
+**负责人：** 2413073-唐涵城。
 
-**分析：**
+**分析**
+
+在本实验中，我倾向于保留 `get_pte(pgdir, la, create)` 的统一实现。查找和创建都要沿 Sv39 的三级页表逐层定位。 `create = 0` 时，`get_page()` 和 `page_remove()` 只沿现有路径查找，缺少下级表就返回 `NULL`。如果下级表齐全，函数会返回末级 PTE 的地址，该项是否形成有效映射仍需检查 `PTE_V`。 `page_insert()` 传入 `create = 1`，遇到缺失的下级表时就地分配并继续遍历。最终的数据页映射由 `page_insert()` 写入。 [pmm.c](../code/kern/mm/pmm.c)
+
+统一实现只需走一遍页表，并且可以在同一次调用中处理创建失败。例如，本次新建 L1 页表后若申请 L0 页表失败，`get_pte()` 会恢复原根项，刷新地址翻译缓存，再回收本次新建的 L1 页表。 `page_insert()` 此时返回 `-E_NO_MEM`，也还未增加目标数据页的引用计数。如果拆成“先查找，失败后从根重新遍历并分配”两个步骤，缺表路径会重复走过已有的上层页表。
+
+拆分的价值主要在接口层。调用点增多时，可以用 `lookup_pte()` 表达只读查找，用 `ensure_pte()` 明确表示这次调用可能分配内存并修改页表。两个入口仍可复用同一套逐级遍历，创建入口负责分配及回滚。这样既能从调用处看出是否有副作用，也能集中维护索引计算、下级页表初始化和失败处理。就当前调用规模而言，现有的 `create` 参数已经足以表达这两种用途。
 
 ---
 
 ## 五、测试与验证
-
 
 ### 5.1 源码静态核对
 
@@ -693,38 +724,78 @@ Sv39 和 Sv48 的地址由 64 位寄存器承载，高位分别需要符合第 3
 | 失败清理 | 记录原根项和本次新建页表，第二次申请失败时回滚 |
 | 非叶项合法性 | 两处使用 `ptd_create()`；自检区分最终 PTE 权限与非叶项保留位 |
 | TLB 调用 | 最终 PTE 更新后按地址失效；下级页表建立或回滚后全量刷新 |
+| 线程登记 | PCB、内核栈和初始现场准备完毕后，在本地关中断区间内分配 PID 并登记，随后置为可运行 |
+| 首次调度 | `context.ra` 指向 `forkret`，`context.sp` 指向新线程栈上的陷阱帧，`sret` 进入 `kernel_thread_entry` |
+| 后续切换 | `switch_to()` 按 `struct context` 的字段顺序保存和恢复 `ra`、`sp` 及 `s0`–`s11` |
 | 注释与练习标记 | 原框架注释已保留，当前仍保留 `LAB4 function1 YOUR CODE` 标记 |
 | 差异格式 | `git diff --check` 未报告空白格式问题 |
 
-以上为源码检查结论，不替代运行测试。
-
 ### 5.2 最终版本编译
+
+在当前源码的独立副本中，使用 `riscv64-unknown-elf-gcc` 15.1.0，从 `code/` 目录执行 `make -j4`。编译和链接成功，生成 ELF 文件 `bin/kernel`，再经 `objcopy` 生成 QEMU 启动镜像 `bin/ucore.img`。 [Makefile](../code/Makefile)
+
+注入评分测试后，镜像同样构建成功。编译器对 `test_lab4_thread()` 报出 `-Wreturn-type` 警告。该测试线程声明为 `int`，其末尾在循环中持续调用 `schedule()`。
 
 ### 5.3 内存模块运行测试
 
+启动时，`check_alloc_page()`、`check_pgdir()` 和 `check_boot_pgdir()` 均通过。其中，`check_pgdir()` 核对了目标物理页、引用计数及页表项标志。 `check_boot_pgdir()` 将同一物理页映射到两个虚拟地址，并验证从其中一个地址写入的内容可以从另一个地址读到。 [pmm.c](../code/kern/mm/pmm.c)
+
+注入的 `test_lab4_pmm_basic()` 检查了新建映射、替换旧页后的权限和引用计数、重复映射同一页以及重复删除。QEMU 串口输出 `[Test PMM] PASS`。 [test_lab4.c](../code/tools/test_lab4.c)
+
+在临时副本中另建一张空根页表，分别令第一次和第二次下级页表页申请失败。两次调用 `page_insert()` 均返回 `-E_NO_MEM`。测试断言根项、目标数据页引用和空闲页数与调用前一致，并确认查不到该地址的末级 PTE。第二种情况验证了新建 L1 页表后申请 L0 页表失败时的回滚。
+
 ### 5.4 进程创建与失败清理验证
+
+`test_lab4_process_create()` 在 `proc_init()` 结束时检查 `current == idleproc`、PID 0 和启动栈 `bootstack`，以及 `initproc` 的 PID 1、就绪态、父进程关系和非零初始上下文入口与栈指针。两者的 `mm` 均为 `NULL`。QEMU 串口输出 `[Test Process Create] PASS`。 [test_lab4.c](../code/tools/test_lab4.c)
+
+在同一份故障注入构建中，分别设置进程数上限和三个失败点，逐项核对返回值、释放调用次数、空闲页数、进程计数、链表首尾和 PID 查询结果。四个场景均通过。
+
+| 场景 | 返回值 | 回收结果 |
+|------|--------|----------|
+| 进程数达到 `MAX_PROCESS` | `-E_NO_FREE_PROC` | 在分配资源前返回 |
+| PCB 分配失败 | `-E_NO_MEM` | 在申请内核栈前返回 |
+| 内核栈分配失败 | `-E_NO_MEM` | 调用 `kfree()` 释放已分配的 PCB |
+| 强制 `copy_mm()` 返回错误 | `-E_NO_MEM` | 调用 `put_kstack()` 回收栈页，再调用 `kfree()` 释放 PCB |
+
+正式实现的 `copy_mm()` 在父线程的 `mm == NULL` 时直接返回成功。表中最后一项通过故障注入验证 `do_fork()` 的清理路径。 [proc.c](../code/kern/process/proc.c)
 
 ### 5.5 多线程调度与上下文切换验证
 
+`test_lab4_schedule()` 在 `init_main()` 入口创建两个测试线程，向同一个入口函数传入不同的参数。两个线程记录各自的执行标志，并主动调用 `schedule()` 让出 CPU。`initproc` 多次发起调度后恢复执行，断言两个标志均已置位。该用例验证了新线程从初始现场进入指定函数、参数传递以及发起调度的线程恢复执行。日志中的 `[Test Schedule] PASS` 与后续 `init_main()` 的输出见 5.7。 [test_lab4.c](../code/tools/test_lab4.c) · [switch.S](../code/kern/process/switch.S)
+
 ### 5.6 官方评分与完整回归
 
-执行`make grade`的结果如下：
+原有 `make grade` 评分记录如下。
 
-```bash
-make grade
-lab4 injection complete
-kern/test/test_lab4.c: In function 'test_lab4_thread':
-kern/test/test_lab4.c:84:1: warning: no return statement in function returning non-void [-Wreturn-type]
-   84 | }
-      | ^
-gmake[1]: Entering directory '/tmp/lab4_grade' + cc kern/init/entry.S + cc kern/init/init.c + cc kern/libs/readline.c + cc kern/libs/stdio.c + cc kern/debug/kdebug.c + cc kern/debug/kmonitor.c + cc kern/debug/panic.c + cc kern/driver/clock.c + cc kern/driver/console.c + cc kern/driver/dtb.c + cc kern/driver/intr.c + cc kern/driver/picirq.c + cc kern/trap/trap.c + cc kern/trap/trapentry.S + cc kern/mm/best_fit_pmm.c + cc kern/mm/default_pmm.c + cc kern/mm/kmalloc.c + cc kern/mm/pmm.c + cc kern/mm/vmm.c + cc kern/process/entry.S + cc kern/process/proc.c + cc kern/process/switch.S + cc kern/schedule/sched.c + cc kern/test/test_lab4.c + cc libs/hash.c + cc libs/printfmt.c + cc libs/string.c + ld bin/kernel riscv64-unknown-elf-objcopy bin/kernel --strip-all -O binary bin/ucore.img gmake[1]: Leaving directory '/tmp/lab4_grade'
+```text
   -check PMM:                                OK
   -check Process Create:                     OK
   -check Schedule:                           OK
 Total Score: 30/30
 ```
 
-### 5.7 日志与截图
+复核环境限制了 QEMU 的 GDB TCP 监听，评分脚本在此环境中未能采集串口输出。复核时使用仓库的 `tools/inject.py` 在源码副本中注入同一组测试，构建后由 QEMU 7.0.0 直接启动镜像。串口输出包含三个 `PASS` 标记及评分脚本检查的三条 `init_main()` 消息。 [inject.py](../code/tools/inject.py) · [grade.sh](../code/tools/grade.sh)
+
+### 5.7 串口日志
+
+```text
+check_alloc_page() succeeded!
+check_pgdir() succeeded!
+check_boot_pgdir() succeeded!
+[Test PMM] PASS
+check_vma_struct() succeeded!
+check_vmm() succeeded.
+[Test Process Create] PASS
+++ setup timer interrupts
+[Test Schedule] PASS
+this initproc, pid = 1, name = "init"
+To U: "Hello world!!".
+To U: "en.., Bye, Bye. :)"
+kernel panic at kern/process/proc.c:209:
+    process exit!!.
+```
+
+三项测试输出完成后，`init_main()` 返回，`kernel_thread_entry` 调用当前框架中仍以 panic 实现的 `do_exit()`，内核随后进入调试监视器。 [entry.S](../code/kern/process/entry.S) · [proc.c](../code/kern/process/proc.c)
 
 ---
 
@@ -734,9 +805,9 @@ Total Score: 30/30
 
 **林泽森：** 本部分完成了物理内存依赖核对、`page_insert()`、`page_remove()` 及其辅助函数，并补充下级页表申请失败时的回滚。实现过程中重点区分了数据页和页表页的引用，理解了同页同地址重复映射应保持引用不变但仍需更新权限，以及删除操作不应创建页表。通过对照 Sv39 规范，进一步区分了最终映射项的权限位与非叶项的保留位，并认识到源码静态检查、编译成功和实际运行验证是不同层次的结论。
 
-**唐涵城：**
+**唐涵城：** 完成了 PCB 初始化、内核线程创建和 `idleproc`、`initproc` 的初始化。通过跟踪首次调度，理解了 `context` 提供切换入口，而 `trapframe` 提供执行线程函数所需的寄存器现场。将 PID 分配和登记放在资源准备之后，使创建失败时可以按已取得的资源逐步回收。结合 Challenge 2 第二问，分析了页表查找和分配共用遍历逻辑的利弊。
 
-**尤祺乐：** 本部分完成了进程调度的功能，对调度器的设计有了一个初步的结论。
+**尤祺乐：** 本部分完成了进程调度的功能，结合进程链表和实验中的轮转策略，理解了调度器如何选择下一个可运行线程。通过实现 `proc_run()` 和 `switch_to()`，掌握了更新 `current`、装载 Sv39 页表和恢复寄存器的顺序。Challenge 1 中的中断保存与恢复也用于保护调度和切换的关键区域。
 
 ### 6.2 主要问题与解决
 
@@ -749,8 +820,8 @@ Total Score: 30/30
 | 初次指导沿用了骨架非叶项的 `PTE_U` | 后续规范核对发现非叶项保留位要求未落实 | 两处改用 `ptd_create()`，保留创建和回滚后的全量刷新 |
 | 修改自检时遗留冲突断言 | 非叶项清零保留位后，旧的根项 `PTE_U=1` 断言仍保留；最终 PTE 的用户权限检查一度遗漏 | 分开检查最终 PTE 的 `U/W` 与根非叶项的 `V` 和保留位，移除矛盾断言 |
 | 合并时遗漏或缩写框架注释 | 初始化调用旁说明和 `pmm_init()` 完整说明未原样保留 | 逐项按原文补回，保留说明细节，不改变代码逻辑 |
-
-上述记录包含源码、编译阶段已发现的问题；不将尚未定位的临时启动异常归因于某一项，也不据此宣称最新版本已经通过完整测试。
+| 新线程需要可恢复的初始现场 | 首次调度前尚无通过 `switch_to()` 保存的现场 | 令初始 `context.ra` 指向 `forkret`，同时在新栈上构造陷阱帧，复用 `sret` 路径进入线程入口 |
+| 进程切换时的 Sv39 页表装载 | 旧 `lsatp()` 封装使用 Sv32 的编码方式 | 按 Sv39 的 `MODE` 和根页表物理页号构造 `satp`，写入后执行 `sfence.vma` |
 
 ### 6.3 本部分知识点与 OS 原理的对应
 
@@ -759,11 +830,24 @@ Total Score: 30/30
 | 多级页表 | 分层组织虚拟地址到物理地址的映射，按需建立稀疏结构 | `get_pte()` 按三个索引查找，必要时分配下级表 |
 | 引用计数 | 通过引用关系管理共享资源的生命周期 | 多个映射可指向同一数据页，最后一条映射撤销后回收 |
 | 地址翻译缓存一致性 | 修改内存中的页表不能自动替代翻译缓存同步 | PTE 更新后执行 `sfence.vma` |
-| 资源分配失败清理 | 多阶段操作失败后回到一致状态 | 第二次页表申请失败时恢复根项并回收新建空表 |
+| 资源分配失败清理 | 多阶段操作失败后回到一致状态 | 下级页表分配失败时回收本次新建的空表，线程创建失败时按已取得的资源回收内核栈和 PCB |
 | 页表项权限与类型 | 映射权限和页表结构信息需要按项的类型解释 | 最终 PTE 使用调用者权限，非叶项清零 `U/A/D` 保留位 |
+| 进程控制块 | 内核用 PCB 统一保存线程身份、状态和资源信息 | `proc_struct` 记录 PID、父进程、内核栈、页表和调度上下文 |
+| 上下文切换与陷阱返回 | 调度点的保存和恢复遵循调用约定，陷阱返回恢复指令地址及特权状态 | `switch_to()` 恢复调度上下文，新线程通过 `forkret()` 与 `sret` 恢复初始现场 |
+| 调度策略与空闲线程 | 调度器选择就绪线程，空闲线程承接无任务可运行时的执行流 | 从当前线程之后循环查找 `PROC_RUNNABLE`，找不到时选择 `idleproc` |
+| 中断保护 | 临时屏蔽本地中断，避免当前 hart 的中断处理打断关键操作 | PID 分配、进程登记和上下文切换使用 `local_intr_save()` 与 `local_intr_restore()` |
 
 ### 6.4 尚未涉及的重要 OS 原理知识点
 
+- **用户进程与地址空间隔离。** 本实验的内核线程共享启动页表。独立用户地址空间的建立、程序装载和系统调用属于后续阶段。 [proc.c](../code/kern/process/proc.c)
+- **退出、等待与资源回收。** 完整的退出流程还需记录退出状态、唤醒等待的父进程，并回收线程的地址空间、内核栈和 PCB。当前 `do_exit()` 是框架中的占位实现。 [proc.c](../code/kern/process/proc.c)
+- **缺页处理与页面置换。** 本实验通过显式调用建立页映射。访问触发的按需分配、页换入和换出需要后续的缺页处理与置换机制。 [pmm.c](../code/kern/mm/pmm.c) · [trap.c](../code/kern/trap/trap.c)
+- **时间片抢占。** 调度测试以线程主动调用 `schedule()` 验证切换，时钟中断处理目前负责重设定时器和计数。由时钟驱动的时间片管理和抢占调度属于后续内容。 [trap.c](../code/kern/trap/trap.c) · [test_lab4.c](../code/tools/test_lab4.c)
+
 ### 6.5 实验总结
+
+本实验把页映射、内核线程创建和调度接入同一条内核启动路径。内存管理先提供页表、物理页和内核堆，进程管理据此为线程分配内核栈并构造初始现场，调度器再将就绪线程切换到 CPU 上运行。映射变更需要同步更新页表项、数据页引用和翻译缓存。线程进入可运行状态之前，内核栈、初始现场与进程登记都应准备完毕。
+
+启动自检和注入测试验证了映射操作、线程初始化与多线程切换。故障注入覆盖了创建过程中的几个中间状态，验证了部分资源已经申请时，内核仍能正确回滚。
 
 ---
